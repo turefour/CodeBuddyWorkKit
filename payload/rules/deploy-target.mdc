@@ -1,0 +1,82 @@
+---
+description: 本机已部署 CodeBuddy 工作套件 —— 优先复用套件内的脚本库、接入工具与索引库，任务收尾自动做版本管理
+globs:
+alwaysApply: true
+---
+
+# 本机已部署 CodeBuddy 工作套件
+
+部署于 **__DEPLOYED__**，本规则由安装程序写入，卸载时自动移除。
+
+## 1. 位置与访问
+
+| 内容 | 位置 |
+|---|---|
+| 部署根目录 | `__TARGET__` |
+| 索引库（项目 / 源码 / 仓库状态 / 脚本库） | __BASE__/ |
+| 进度看板 Pulse | `http://127.0.0.1:__PORT_PULSE__/` |
+| 降温面板 Tuner | `http://127.0.0.1:__PORT_TUNER__/` |
+| 监听地址 | `__HOST__` |
+
+启动与停止（不要手敲 node 命令）：
+
+```powershell
+& "__TARGET__\启动全部服务.cmd"     # 或 启动索引库.cmd
+& "__TARGET__\停止全部服务.cmd"
+```
+
+## 2. 优先查询：先用套件里的工具，不要临时重造
+
+| 需求 | 直接调用 |
+|---|---|
+| 查项目索引、源码、仓库状态 | 打开 __BASE__/（侧栏「仓库与备份」「工具脚本库」） |
+| 纳管一个新项目（入库 + 索引） | `node "__TARGET__\apps\scriptvault\tools\adopt-project.mjs" "<目录>" --name <slug> --dry` |
+| 新建可复用脚本 | `node "__TARGET__\apps\scriptvault\tools\scaffold.mjs" <name> --purpose "..." --category web` |
+| 页面截图 + 采集 console 错误 | `node "__TARGET__\apps\scriptvault\tools\shot.mjs" --url <url> --launch --json --close` |
+| 多仓库状态汇总 | `node "__TARGET__\apps\scriptvault\tools\git-report.mjs" --strict` |
+| 重建脚本索引 | `node "__TARGET__\apps\scriptvault\build-index.mjs"` |
+
+硬性要求：
+
+- 新脚本一律放 `__TARGET__\apps\scriptvault\`（`lib/` 模块、`tools/` 工具、`tests/` 用例），
+  首个注释块必须含 `@name / @category / @purpose / @input / @usage / @reuse`
+- 改完脚本跑一次 `build-index.mjs`，索引页才会更新
+- 截图/临时验证脚本不要留在项目目录里
+
+## 3. 版本管理（任务收尾必做）
+
+改了文件且验证通过后：
+
+```powershell
+# 1) 刷新索引库的项目规模与时间
+node "__TARGET__\apps\codevault\tools\scan.mjs"
+
+# 2) 提交对应仓库（改哪个提交哪个）
+cd <仓库根>
+git add -A
+git commit -m "<type>: <说明>"
+```
+
+约定：
+
+- 仓库清单唯一来源 `__TARGET__\apps\scriptvault\config\repos.json`，
+  由 `adopt-project` 维护，**不要手工去改两处数组**
+- 提交前确认 `.gitignore` 生效（`node_modules`、`logs`、`.env`、`token.txt`、`*.jsonl` 不入库）
+- 若本机没有 `git` 命令：优先用随包版本
+  `__TARGET__\runtime\git\cmd\git.exe`；再没有就提示用户安装 Git 后重试
+
+## 4. 服务异常处置
+
+| 现象 | 处理 |
+|---|---|
+| 页面打不开 | 先 `启动全部服务.cmd`；仍失败看 `__TARGET__\apps\codevault\` 是否完整 |
+| 端口被占用 | 改 `__TARGET__\config\deploy.json` 里的端口后重启 |
+| 重复测试进程堆积 | 打开 Pulse 看板顶部的告警条，点「清理」或「解锁」 |
+| 想完全撤销 | 运行 `__TARGET__\一键清理与回退.cmd` |
+
+## 5. 禁止事项
+
+1. 不要删除 `__TARGET__\config\deploy.json`（启动脚本靠它取端口）
+2. 不要把业务数据（`*.jsonl`、`token.txt`、`.env`）提交进仓库
+3. 不要在未确认的情况下对生产目录执行 `adopt-project`
+4. 不要用 `taskkill /IM node.exe` 这类一刀切命令停服务，用 `停止全部服务.cmd`

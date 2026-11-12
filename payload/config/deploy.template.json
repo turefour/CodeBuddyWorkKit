@@ -1,0 +1,14 @@
+{
+  "$comment": "部署配置模板：安装器会把占位符替换成实际值，写到目标目录 config/deploy.json。",
+  "version": "1.0.0",
+  "host": "__HOST__",
+  "lan": __LAN__,
+  "ports": {
+    "codevault": __PORT_CODEVAULT__,
+    "pulse": __PORT_PULSE__,
+    "tuner": __PORT_TUNER__
+  },
+  "apps": ["codevault", "pulse", "tuner", "scriptvault"],
+  "rules": ["deploy-target.mdc"],
+  "runtime": "__RUNTIME__"
+}

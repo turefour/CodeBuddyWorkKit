@@ -14,10 +14,9 @@ state/
 Thumbs.db
 .DS_Store
 ~$*
-# added by adopt-project
+# added by adopt-project（注意：不能用 build/ 规则，build/ 目录里放的是构建脚本本身）
 node_modules/
 dist/
-build/
 coverage/
 .cache/
 .env

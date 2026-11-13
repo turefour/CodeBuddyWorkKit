@@ -99,6 +99,29 @@ namespace CodeBuddyWorkKit
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(
+            IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_WINDOWEDGE = 0x00000100;
+        private const int WS_EX_CLIENTEDGE = 0x00000200;
+        private const int WS_EX_STATICEDGE = 0x00020000;
+        private const int WS_EX_DLGMODALFRAME = 0x00000001;
+        private const int WS_EX_APPWINDOW = 0x00040000;
+
+        private const uint SWP_FRAMECHANGED = 0x0020;
+        private const uint SWP_SHOWWINDOW = 0x0040;
+        private const uint SWP_NOACTIVATE = 0x0010;
+
+        // DWMWA_NCRENDERING_POLICY = 2, DWMNCRP_DISABLED
+        private const int DWMWA_NCRENDERING_POLICY = 2;
+        // DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND (Win11 22H2+)
+        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [DllImport("user32.dll")]
@@ -168,8 +191,10 @@ namespace CodeBuddyWorkKit
             ParseArgs(args);
 
             Text = "CodeBuddy 工作套件";
-            Width = 1360;
-            Height = 900;
+            // Fit the work area: a fixed 1360x900 window overflows a 1366x768 laptop.
+            Rectangle work = Screen.PrimaryScreen.WorkingArea;
+            Width = Math.Min(1360, work.Width - 40);
+            Height = Math.Min(900, work.Height - 40);
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(960, 640);
             BackColor = Color.FromArgb(18, 24, 34);
@@ -922,6 +947,28 @@ namespace CodeBuddyWorkKit
                 style |= WS_CHILD;
                 SetWindowLong(_pageHwnd, GWL_STYLE, style);
 
+                // Chrome draws its own window edge through the extended style: leaving
+                // WS_EX_CLIENTEDGE/WINDOWEDGE in place is what looked like "multiple
+                // browser frames" inside the shell window.
+                int exStyle = GetWindowLong(_pageHwnd, GWL_EXSTYLE);
+                exStyle &= ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE |
+                             WS_EX_DLGMODALFRAME | WS_EX_APPWINDOW);
+                SetWindowLong(_pageHwnd, GWL_EXSTYLE, exStyle);
+
+                // Disable the non-client area and the Win11 rounded corners, otherwise
+                // a 1px bright edge + shadow ring remain visible around the page.
+                try
+                {
+                    int noNc = 2; // DWMNCRP_DISABLED
+                    DwmSetWindowAttribute(_pageHwnd, DWMWA_NCRENDERING_POLICY, ref noNc, 4);
+                    int noRound = 1; // DWMWCP_DONOTROUND
+                    DwmSetWindowAttribute(_pageHwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref noRound, 4);
+                }
+                catch
+                {
+                    /* older Windows: cosmetic only */
+                }
+
                 ShowWindow(_pageHwnd, SW_SHOW);
                 _embedded = true;
                 LayoutEmbedded();
@@ -939,6 +986,19 @@ namespace CodeBuddyWorkKit
         private void LayoutEmbedded()
         {
             if (!_embedded || _pageHwnd == IntPtr.Zero) return;
+            // MoveWindow alone leaves the child with its old frame metrics, so the
+            // page never quite fills the client area. SWP_FRAMECHANGED forces the
+            // child to recompute its non-client area after the style change.
+            SetWindowPos(
+                _pageHwnd,
+                IntPtr.Zero,
+                0,
+                0,
+                ClientSize.Width,
+                ClientSize.Height,
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+            // Belt and braces: the client area of the child must equal what we asked.
             MoveWindow(_pageHwnd, 0, 0, ClientSize.Width, ClientSize.Height, true);
         }
 

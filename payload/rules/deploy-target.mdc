@@ -33,7 +33,7 @@ alwaysApply: true
 | 纳管一个新项目（入库 + 索引） | `node "__TARGET__\apps\scriptvault\tools\adopt-project.mjs" "<目录>" --name <slug> --dry` |
 | 新建可复用脚本 | `node "__TARGET__\apps\scriptvault\tools\scaffold.mjs" <name> --purpose "..." --category web` |
 | 页面截图 + 采集 console 错误 | `node "__TARGET__\apps\scriptvault\tools\shot.mjs" --url <url> --launch --json --close` |
-| 多仓库状态汇总 | `node "__TARGET__\apps\scriptvault\tools\git-report.mjs" --strict` |
+| 多仓库状态汇总 | **不调脚本，直接内联**（见下方「直接构建」一节） |
 | 重建脚本索引 | `node "__TARGET__\apps\scriptvault\build-index.mjs"` |
 
 硬性要求：
@@ -42,6 +42,14 @@ alwaysApply: true
   首个注释块必须含 `@name / @category / @purpose / @input / @usage / @reuse`
 - 改完脚本跑一次 `build-index.mjs`，索引页才会更新
 - 截图/临时验证脚本不要留在项目目录里
+
+### 工具是否值得调？先看 measure-cost
+
+`node "__TARGET__\apps\scriptvault\tools\measure-cost.mjs"` 会给出每个工具的
+「复用成本 vs 从零构建成本」。当前结论：4 个工具都保留（1.8x ~ 8x）。
+
+注意：评估「从零更省」时**必须算隐性坑**。例：手写 PowerShell 读 JSON 忘了 `-Encoding UTF8`，
+PS 5.1 按 GBK 解码会直接报错并吐出整份 JSON（≈780 token），一次返工就吃掉全部收益。
 
 ## 3. 版本管理（任务收尾必做）
 

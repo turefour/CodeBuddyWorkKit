@@ -112,4 +112,36 @@
   · 明确禁止把密钥、日志、业务数据提交进仓库
 
 卸载时会自动移除该规则文件。
+
+九、适配其他 AI 编程平台
+----------------------------------------------------------------------------
+本套件 90% 的部分与平台无关：索引库、Pulse 看板、Tuner 面板、脚本库工具、
+部署脚本、托盘窗口、版本检测，都只依赖 HTTP 与命令行，任何平台都能用。
+
+唯一需要"落盘"的是规则正文（告诉 AI 这套东西在哪、工具怎么调）。安装时
+tools\install-rules.ps1 会把同一份正文分发到各平台的约定位置：
+
+  平台          落盘位置                              方式
+  ------------  ------------------------------------  --------
+  CodeBuddy     ~\.codebuddy\rules\deploy-target.mdc   独占文件
+  Cursor        ~\.cursor\rules\deploy-target.mdc      独占文件
+  Windsurf      ~\.windsurf\rules\deploy-target.md     独占文件
+  Claude Code   ~\.claude\CLAUDE.md                    追加区块
+  Codex         ~\.codex\AGENTS.md                     追加区块
+  Cline         ~\.clinerules                          追加区块
+  通用          <安装目录>\AGENTS.md                    追加区块
+
+默认 auto：只为本机已存在的平台目录写（只装了 CodeBuddy 就只写它 + 通用一份）。
+强制全写：安装时加 -Platforms all
+
+聚合文件里的内容被 <!-- CodeBuddyWorkKit:BEGIN --> 包裹：
+  · 重复安装只替换这一块，不动你的其它内容
+  · 卸载时只删这一块，块外的规则原样保留
+
+关于自动化采集（Pulse 的 hook）：
+  hook 配置是 CodeBuddy 插件格式，其他平台不会自动加载。但这不影响看板可用：
+    · 进程扫描（含重复测试进程守护）与平台无关，照常工作
+    · 想拿命令进度可用包装方式：node <安装目录>\apps\pulse\cli\pulse.js run -- <命令>
+  Claude Code 这类支持 hooks 的平台，可参照 apps\pulse\hooks\hooks.json
+  的事件名（PreToolUse / PostToolUse / Stop）自行接入，回调同一个 pulse-hook.js。
 ============================================================================

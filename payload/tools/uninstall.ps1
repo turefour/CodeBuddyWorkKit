@@ -108,17 +108,56 @@ try {
   Add-Step '注册表登记' 'fail' $_.Exception.Message
 }
 
-# ------------------------------------------------------------------ 3. 规则
-$ruleFile = Join-Path $env:USERPROFILE '.codebuddy\rules\deploy-target.mdc'
-try {
-  if (Test-Path $ruleFile) {
-    Remove-Item $ruleFile -Force
-    Add-Step '部署规则' 'done' 'deploy-target.mdc 已移除（其它规则未动）'
-  } else {
-    Add-Step '部署规则' 'skip' '不存在'
+# ------------------------------------------------------------------ 3. 规则（多平台）
+# 两种写法要分别处理：
+#   独占文件 -> 直接删；聚合文件 -> 只删受管区块，用户自己的内容必须保留
+$BEGIN_MARK = '<!-- CodeBuddyWorkKit:BEGIN id=deploy-target -->'
+$END_MARK = '<!-- CodeBuddyWorkKit:END -->'
+$H = $env:USERPROFILE
+
+$ruleTargets = @(
+  @{ label = 'CodeBuddy';  path = "$H\.codebuddy\rules\deploy-target.mdc"; mode = 'file' },
+  @{ label = 'Cursor';     path = "$H\.cursor\rules\deploy-target.mdc";    mode = 'file' },
+  @{ label = 'Windsurf';   path = "$H\.windsurf\rules\deploy-target.md";   mode = 'file' },
+  @{ label = 'Claude Code'; path = "$H\.claude\CLAUDE.md";                 mode = 'block' },
+  @{ label = 'Codex';      path = "$H\.codex\AGENTS.md";                   mode = 'block' },
+  @{ label = 'Cline';      path = "$H\.clinerules";                        mode = 'block' },
+  @{ label = '通用';       path = (Join-Path $Target 'AGENTS.md');          mode = 'block' }
+)
+
+$removedRules = 0
+foreach ($item in $ruleTargets) {
+  try {
+    if (-not (Test-Path $item.path)) { continue }
+
+    if ($item.mode -eq 'file') {
+      Remove-Item $item.path -Force
+      $removedRules += 1
+      continue
+    }
+
+    $text = [System.IO.File]::ReadAllText($item.path, [System.Text.Encoding]::UTF8)
+    if ($text -notmatch [regex]::Escape($BEGIN_MARK)) { continue }
+
+    $pattern = '(?s)' + [regex]::Escape($BEGIN_MARK) + '.*?' + [regex]::Escape($END_MARK)
+    $cleaned = [regex]::Replace($text, $pattern, '').TrimEnd()
+
+    if ([string]::IsNullOrWhiteSpace($cleaned)) {
+      # 文件里只有我们的区块，整个删掉
+      Remove-Item $item.path -Force
+    } else {
+      [System.IO.File]::WriteAllText($item.path, $cleaned + "`n", (New-Object System.Text.UTF8Encoding $false))
+    }
+    $removedRules += 1
+  } catch {
+    Add-Step ("规则 " + $item.label) 'fail' $_.Exception.Message
   }
-} catch {
-  Add-Step '部署规则' 'fail' $_.Exception.Message
+}
+
+if ($removedRules -gt 0) {
+  Add-Step '部署规则' 'done' ("已从 {0} 个平台移除受管规则（其它规则未动）" -f $removedRules)
+} else {
+  Add-Step '部署规则' 'skip' '未发现受管规则'
 }
 
 # ------------------------------------------------------------------ 4. 目录

@@ -23,6 +23,8 @@ param(
   [switch]$NoDesktop,
   [switch]$NoRules,
   [switch]$ResetConfig,
+  # 规则分发目标：auto（只为已装平台写，默认）| all | codebuddy,codex,claude,cursor,windsurf,cline,generic
+  [string]$Platforms = 'auto',
   [switch]$Json
 )
 
@@ -319,25 +321,28 @@ Say '  [info] 未写入注册表 Run / 启动文件夹（不做开机自启）' 
 
 # ------------------------------------------------------------------ 4. 规则
 Say ''
-Say '  [4/5] 写入 CodeBuddy 规则' 'Cyan'
+Say '  [4/5] 分发规则（多平台）' 'Cyan'
 if (-not $NoRules) {
-  $rulesDir = Join-Path $env:USERPROFILE '.codebuddy\rules'
-  New-Item -ItemType Directory -Force -Path $rulesDir | Out-Null
-  $tpl = Join-Path $PayloadRoot 'rules\deploy-target.mdc'
-  if (Test-Path $tpl) {
-    $body = Get-Content $tpl -Raw -Encoding UTF8
-    $base = 'http://127.0.0.1:' + $config.ports.codevault
-    $body = $body.Replace('__TARGET__', $Target)
-    $body = $body.Replace('__PORT_CODEVAULT__', [string]$config.ports.codevault)
-    $body = $body.Replace('__PORT_PULSE__', [string]$config.ports.pulse)
-    $body = $body.Replace('__PORT_TUNER__', [string]$config.ports.tuner)
-    $body = $body.Replace('__HOST__', $config.host)
-    $body = $body.Replace('__BASE__', $base)
-    $body = $body.Replace('__DEPLOYED__', (Get-Date).ToString('yyyy-MM-dd'))
-    [System.IO.File]::WriteAllText((Join-Path $rulesDir 'deploy-target.mdc'), $body, (New-Object System.Text.UTF8Encoding $false))
-    Say '  [ok]   deploy-target.mdc' 'Green'
+  # 规则正文只有一份，按平台落到各自的约定路径：
+  #   CodeBuddy / Cursor -> 独占 .mdc；Codex / Claude / Cline -> 追加受管区块
+  $installRules = Join-Path $Target 'tools\install-rules.ps1'
+  if (Test-Path $installRules) {
+    $ruleArgs = @(
+      '-Target', $Target,
+      '-PackageRoot', $PayloadRoot,
+      '-PortCodevault', [string]$config.ports.codevault,
+      '-PortPulse', [string]$config.ports.pulse,
+      '-PortTuner', [string]$config.ports.tuner,
+      '-BindAddress', [string]$config.host,
+      '-Platforms', $Platforms
+    )
+    try {
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $installRules @ruleArgs
+    } catch {
+      Say ('  [warn] 规则分发失败：' + $_.Exception.Message) 'Yellow'
+    }
   } else {
-    Say '  [warn] 规则模板缺失，跳过' 'Yellow'
+    Say '  [warn] install-rules.ps1 缺失，跳过' 'Yellow'
   }
 } else {
   Say '  [skip] 已指定 -NoRules' 'DarkYellow'

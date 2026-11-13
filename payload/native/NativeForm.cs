@@ -822,7 +822,7 @@ namespace WorkKit.Native
 
             if (_recentProjects != null)
             {
-                _recentProjects.BeginUpdate();
+                ListSync.Freeze(_recentProjects); _recentProjects.BeginUpdate();
                 _recentProjects.Items.Clear();
                 int shown = 0;
                 foreach (object item in list)
@@ -839,6 +839,7 @@ namespace WorkKit.Native
                     if (shown >= 40) break;
                 }
                 _recentProjects.EndUpdate();
+                ListSync.Thaw(_recentProjects);
             }
 
             Dictionary<string, object> scripts = Api.GetObject("http://127.0.0.1:" + _port + "/api/scripts", 3000);
@@ -924,7 +925,7 @@ namespace WorkKit.Native
                 ? Convert.ToString(_scriptCategory.SelectedItem)
                 : "";
 
-            _scriptList.BeginUpdate();
+            string keepScript = ListSync.CaptureSelection(_scriptList); ListSync.Freeze(_scriptList); _scriptList.BeginUpdate();
             _scriptList.Items.Clear();
             foreach (object item in entries)
             {
@@ -940,7 +941,7 @@ namespace WorkKit.Native
                 row.Tag = map;
                 _scriptList.Items.Add(row);
             }
-            _scriptList.EndUpdate();
+            _scriptList.EndUpdate(); ListSync.Thaw(_scriptList); ListSync.RestoreSelection(_scriptList, keepScript);
         }
 
         private static string CategoryLabel(List<object> categories, string id)
@@ -1017,8 +1018,8 @@ namespace WorkKit.Native
             {
                 Dictionary<string, object> map = item as Dictionary<string, object>;
                 if (map == null) continue;
-                cpu += Api.Dbl(map, "cpu", 0);
-                memMb += Api.Dbl(map, "memMb", 0);
+                cpu += Api.Dbl(map, "cpuPercent", 0);
+                memMb += Api.Dbl(map, "memMB", 0);
             }
             if (_kpiCpu != null) _kpiCpu.Text = Math.Round(cpu, 1) + "%";
             if (_kpiMem != null) _kpiMem.Text = Math.Round(memMb, 0) + " MB";
@@ -1054,7 +1055,7 @@ namespace WorkKit.Native
             }
 
             if (_procList == null) return;
-            _procList.BeginUpdate();
+            string keepProc = ListSync.CaptureSelection(_procList); ListSync.Freeze(_procList); _procList.BeginUpdate();
             _procList.Items.Clear();
             int shown = 0;
             foreach (object item in processes)
@@ -1064,8 +1065,8 @@ namespace WorkKit.Native
                 ListViewItem row = new ListViewItem(Api.Int(map, "pid", 0).ToString());
                 row.SubItems.Add(Api.Str(map, "role", "-"));
                 row.SubItems.Add(Api.Str(map, "name", "-"));
-                row.SubItems.Add(Math.Round(Api.Dbl(map, "cpu", 0), 1) + "%");
-                row.SubItems.Add(Math.Round(Api.Dbl(map, "memMb", 0), 0) + " MB");
+                row.SubItems.Add(Math.Round(Api.Dbl(map, "cpuPercent", 0), 1) + "%");
+                row.SubItems.Add(Math.Round(Api.Dbl(map, "memMB", 0), 0) + " MB");
                 string command = Api.Str(map, "command", "");
                 if (command.Length > 90) command = command.Substring(0, 90) + "…";
                 row.SubItems.Add(command);
@@ -1074,7 +1075,7 @@ namespace WorkKit.Native
                 shown += 1;
                 if (shown >= 60) break;
             }
-            _procList.EndUpdate();
+            _procList.EndUpdate(); ListSync.Thaw(_procList); ListSync.RestoreSelection(_procList, keepProc);
         }
 
         // ---------------------------------------------------------- 报错

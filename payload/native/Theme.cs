@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace WorkKit.Native
@@ -38,6 +39,89 @@ namespace WorkKit.Native
         internal static Font Section { get { return Font(10F, FontStyle.Bold); } }
         internal static Font Mono { get { return new Font("Consolas", 8.5F); } }
         internal static Font MonoBig { get { return new Font("Consolas", 11F, FontStyle.Bold); } }
+    }
+
+    /// <summary>
+    /// 双缓冲 ListView。
+    /// OwnerDraw 的列表在频繁刷新时，默认实现会「擦背景 → 逐行重画」，
+    /// 中间那一帧就是肉眼看到的闪白。开双缓冲后整块先画到离屏位图再一次性提交。
+    /// </summary>
+    internal sealed class BufferedListView : ListView
+    {
+        internal BufferedListView()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            SetStyle(ControlStyles.UserPaint, false);
+        }
+    }
+
+    /// <summary>
+    /// 批量更新 ListView：冻结重绘 → 改数据 → 恢复并刷新一次。
+    ///
+    /// BeginUpdate 只是延迟绘制，Clear() 仍会擦除背景，中间态依然可见。
+    /// WM_SETREDRAW 把绘制整个关掉，改完一次性呈现，这是消除闪烁的关键。
+    /// </summary>
+    internal static class ListSync
+    {
+        private const int WM_SETREDRAW = 0x000B;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+
+        internal static void Freeze(ListView list)
+        {
+            try
+            {
+                if (list != null && list.IsHandleCreated) SendMessage(list.Handle, WM_SETREDRAW, 0, 0);
+            }
+            catch
+            {
+                /* 冻结失败只影响观感 */
+            }
+        }
+
+        internal static void Thaw(ListView list)
+        {
+            try
+            {
+                if (list == null || !list.IsHandleCreated) return;
+                SendMessage(list.Handle, WM_SETREDRAW, 1, 0);
+                list.Invalidate(true);
+                list.Update();
+            }
+            catch
+            {
+                /* ignore */
+            }
+        }
+
+        /// <summary>选中行的首列文本，用于重建后恢复选中。</summary>
+        internal static string CaptureSelection(ListView list)
+        {
+            if (list == null || list.SelectedItems.Count == 0) return null;
+            return list.SelectedItems[0].Text;
+        }
+
+        /// <summary>按首列文本恢复选中；找不到就退回首行。</summary>
+        internal static void RestoreSelection(ListView list, string key)
+        {
+            if (list == null || list.Items.Count == 0) return;
+
+            if (!string.IsNullOrEmpty(key))
+            {
+                foreach (ListViewItem item in list.Items)
+                {
+                    if (item.Text == key)
+                    {
+                        item.Selected = true;
+                        item.Focused = true;
+                        return;
+                    }
+                }
+            }
+            if (list.SelectedItems.Count == 0) list.Items[0].Selected = true;
+        }
     }
 
     /// <summary>控件工厂：把重复的「深色外观设置」收敛到一处。</summary>
@@ -84,10 +168,10 @@ namespace WorkKit.Native
             return button;
         }
 
-        /// <summary>深色 ListView：整行选中、无网格线、双列可排序外观。</summary>
+        /// <summary>深色 ListView：整行选中、无网格线、双缓冲。</summary>
         internal static ListView List(params string[] columns)
         {
-            ListView list = new ListView();
+            ListView list = new BufferedListView();
             list.View = View.Details;
             list.FullRowSelect = true;
             list.HideSelection = false;

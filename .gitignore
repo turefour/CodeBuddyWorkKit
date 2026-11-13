@@ -2,6 +2,7 @@
 payload/apps/
 payload/runtime/
 payload/shell/*.exe
+payload/native/*.exe
 installer.exe
 *.zip
 

@@ -198,6 +198,25 @@ if ((Test-Path $configFile) -and -not $ResetConfig) {
   Say ("  [ok]   config\deploy.json（端口 {0}/{1}/{2}，监听 {3}）" -f $Port, $PulsePort, $TunerPort, $config.host) 'Green'
 }
 
+# 仓库清单里先登记本套件自身：否则「仓库与备份」页面是空的，用户不知道能加什么
+$reposFile = Join-Path $Target 'apps\scriptvault\config\repos.json'
+if (Test-Path $reposFile) {
+  try {
+    $repoData = Get-Content $reposFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (@($repoData.repos).Count -eq 0) {
+      $repoData.repos = @([pscustomobject]@{ name = 'workkit'; path = $Target; note = '本套件部署目录' })
+      [System.IO.File]::WriteAllText(
+        $reposFile,
+        ($repoData | ConvertTo-Json -Depth 4),
+        (New-Object System.Text.UTF8Encoding $false)
+      )
+      Say '  [ok]   仓库清单已登记部署目录（workkit）' 'Green'
+    }
+  } catch {
+    Say ('  [warn] 仓库清单初始化失败：' + $_.Exception.Message) 'Yellow'
+  }
+}
+
 # ------------------------------------------------------------------ 3. 启动脚本
 Say ''
 Say '  [3/5] 生成启动脚本' 'Cyan'

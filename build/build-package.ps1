@@ -101,6 +101,33 @@ foreach ($name in @('codevault', 'pulse', 'tuner', 'scriptvault')) {
   $total += Copy-Filtered -Source $Sources[$name] -Destination (Join-Path $AppsDir $name) -Label $name
 }
 
+# ------------------------------------------------------------------ 1b. 清空本机数据
+# 分发包不能带自己的项目索引与仓库清单：目标机上这些路径不存在，索引页会显示
+# 一堆打不开的项目，也会把本机目录结构泄露出去。部署后由 adopt-project 重新登记。
+Say ''
+Say '  [1b/5] 清空本机私有数据' 'Cyan'
+
+$projectsFile = Join-Path $AppsDir 'codevault\data\projects.json'
+if (Test-Path $projectsFile) {
+  $empty = [pscustomobject]@{
+    generatedAt = (Get-Date).ToString('yyyy-MM-dd')
+    projects    = @()
+  }
+  [System.IO.File]::WriteAllText($projectsFile, ($empty | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $false))
+  Say '  [ok]   codevault\data\projects.json -> 空索引（部署后用 adopt-project 登记）' 'Green'
+}
+
+$reposFile = Join-Path $AppsDir 'scriptvault\config\repos.json'
+if (Test-Path $reposFile) {
+  $empty = [pscustomobject]@{
+    '$comment'  = '仓库清单：部署后由 tools/adopt-project.mjs 登记'
+    updatedAt   = (Get-Date).ToString('yyyy-MM-dd')
+    repos       = @()
+  }
+  [System.IO.File]::WriteAllText($reposFile, ($empty | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $false))
+  Say '  [ok]   scriptvault\config\repos.json -> 空清单（部署后用 adopt-project 登记）' 'Green'
+}
+
 # ------------------------------------------------------------------ 2. 运行时
 Say ''
 Say '  [2/5] 复制运行时' 'Cyan'

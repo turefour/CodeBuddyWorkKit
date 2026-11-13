@@ -42,6 +42,7 @@ namespace WorkKit.Native
 
         private Panel _topBar;
         private Label _statusLabel;
+        private Label _statsLabel;
         private Panel _errorButton;
         private Label _errorText;
         private Label _errorBadge;
@@ -79,7 +80,8 @@ namespace WorkKit.Native
         // ---------------------------------------------------------- 项目
 
         private ListView _projectList;
-        private TextBox _projectDetail;
+        private Panel _projectDetail;
+        private string _detailText = "";
 
         // ---------------------------------------------------------- 脚本库
 
@@ -200,6 +202,10 @@ namespace WorkKit.Native
             brand.Bounds = new Rectangle(16, 10, 110, 26);
             _topBar.Controls.Add(brand);
 
+            _statsLabel = Ui.Text("", Theme.Small, Theme.Dim);
+            _statsLabel.Bounds = new Rectangle(660, 14, 300, 20);
+            _topBar.Controls.Add(_statsLabel);
+
             _statusLabel = Ui.Text("正在连接服务…", Theme.Small, Theme.Dim);
             _statusLabel.Bounds = new Rectangle(132, 12, 520, 22);
             _topBar.Controls.Add(_statusLabel);
@@ -267,6 +273,11 @@ namespace WorkKit.Native
             }
             if (_errorButton != null) _errorButton.Location = new Point(right - _errorButton.Width, 8);
             if (_statusLabel != null) _statusLabel.Width = Math.Max(160, right - _errorButton.Width - 160);
+            if (_statsLabel != null && _statusLabel != null)
+            {
+                _statsLabel.Location = new Point(_statusLabel.Right + 16, 14);
+                _statsLabel.Width = Math.Max(120, Math.Min(320, right - _errorButton.Width - _statsLabel.Left - 8));
+            }
         }
 
         // ---------------------------------------------------------- 侧栏导航
@@ -486,7 +497,7 @@ namespace WorkKit.Native
             _recentProjects.Columns[1].Width = 110;
             _recentProjects.Columns[2].Width = 100;
             _recentProjects.Columns[3].Width = 420;
-            Draw.List(_recentProjects);
+            Draw.ListView(_recentProjects);
             panel.Controls.Add(_recentProjects);
 
             return panel;
@@ -499,10 +510,8 @@ namespace WorkKit.Native
             card.BackColor = Theme.Card;
             card.Paint += delegate(object s, PaintEventArgs e)
             {
-                using (Pen pen = new Pen(Theme.Border))
-                {
-                    e.Graphics.DrawRectangle(pen, 0, 0, card.Width - 1, card.Height - 1);
-                }
+                e.Graphics.DrawRectangle(Theme.Pen(Theme.Border), 0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.FillRectangle(Theme.Brush(Theme.Accent), new Rectangle(0, 0, 3, card.Height));
             };
             parent.Controls.Add(card);
 
@@ -531,44 +540,50 @@ namespace WorkKit.Native
             panel.Controls.Add(sub);
 
             _projectList = Ui.List("项目", "类型", "状态", "问题");
-            _projectList.Bounds = new Rectangle(0, 60, 520, 460);
+            _projectList.Bounds = new Rectangle(0, 60, 560, 460);
+
+            // 详情直接画在容器上：右侧区域没有子控件，Pain t 一定可见，
+            // 也省掉一个控件句柄。
+            panel.Paint += delegate(object s, PaintEventArgs e)
+            {
+                if (_detailText.Length == 0) return;
+                Rectangle box = new Rectangle(576, 60, Math.Max(200, panel.Width - 592), Math.Max(120, panel.Height - 76));
+                e.Graphics.FillRectangle(Theme.Brush(Theme.Card), box);
+                e.Graphics.DrawRectangle(Theme.Pen(Theme.Border), box.Left, box.Top, box.Width - 1, box.Height - 1);
+                e.Graphics.FillRectangle(Theme.Brush(Theme.Accent), new Rectangle(box.Left, box.Top, 3, box.Height));
+                TextRenderer.DrawText(
+                    e.Graphics, _detailText, Theme.Mono,
+                    new Rectangle(box.Left + 14, box.Top + 12, box.Width - 28, box.Height - 24),
+                    Theme.Text,
+                    TextFormatFlags.Top | TextFormatFlags.Left | TextFormatFlags.WordBreak);
+            };
             _projectList.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Bottom;
             _projectList.Columns[0].Width = 180;
             _projectList.Columns[1].Width = 110;
             _projectList.Columns[2].Width = 90;
             _projectList.Columns[3].Width = 90;
             _projectList.SelectedIndexChanged += delegate { ShowProjectDetail(); };
-            Draw.List(_projectList);
+            Draw.ListView(_projectList);
             panel.Controls.Add(_projectList);
-
-            _projectDetail = new TextBox();
-            _projectDetail.Multiline = true;
-            _projectDetail.ReadOnly = true;
-            _projectDetail.ScrollBars = ScrollBars.Vertical;
-            _projectDetail.BorderStyle = BorderStyle.None;
-            _projectDetail.BackColor = Theme.Panel;
-            _projectDetail.ForeColor = Theme.Text;
-            _projectDetail.Font = Theme.Mono;
-            _projectDetail.Bounds = new Rectangle(536, 60, 420, 460);
-            _projectDetail.Anchor = AnchorStyles.Top | AnchorStyles.Right | AnchorStyles.Bottom;
-            panel.Controls.Add(_projectDetail);
 
             return panel;
         }
 
         private void ShowProjectDetail()
         {
-            if (_projectList == null || _projectDetail == null) return;
+            if (_projectList == null) return;
             if (_projectList.SelectedItems.Count == 0)
             {
-                _projectDetail.Text = "选择一个项目查看详情。";
+                _detailText = "选择一个项目查看详情。";
+                if (_viewProjects != null) _viewProjects.Invalidate();
                 return;
             }
             object tag = _projectList.SelectedItems[0].Tag;
             Dictionary<string, object> map = tag as Dictionary<string, object>;
             if (map == null)
             {
-                _projectDetail.Text = "无详情数据。";
+                _detailText = "无详情数据。";
+                if (_viewProjects != null) _viewProjects.Invalidate();
                 return;
             }
 
@@ -604,7 +619,8 @@ namespace WorkKit.Native
                     Api.Str(issue, "title", "-"));
             }
 
-            _projectDetail.Text = sb.ToString();
+            _detailText = sb.ToString();
+            if (_viewProjects != null) _viewProjects.Invalidate();
         }
 
         // ---------------------------------------------------------- 脚本库
@@ -638,7 +654,7 @@ namespace WorkKit.Native
             _scriptList.Columns[1].Width = 130;
             _scriptList.Columns[2].Width = 560;
             _scriptList.DoubleClick += delegate { OpenSelectedScript(); };
-            Draw.List(_scriptList);
+            Draw.ListView(_scriptList);
             panel.Controls.Add(_scriptList);
 
             return panel;
@@ -687,7 +703,7 @@ namespace WorkKit.Native
             _repoList.Columns[3].Width = 80;
             _repoList.Columns[4].Width = 80;
             _repoList.Columns[5].Width = 400;
-            Draw.List(_repoList);
+            Draw.ListView(_repoList);
             panel.Controls.Add(_repoList);
 
             return panel;
@@ -725,7 +741,7 @@ namespace WorkKit.Native
             _procList.Columns[3].Width = 70;
             _procList.Columns[4].Width = 90;
             _procList.Columns[5].Width = 400;
-            Draw.List(_procList);
+            Draw.ListView(_procList);
             panel.Controls.Add(_procList);
 
             return panel;
@@ -853,6 +869,11 @@ namespace WorkKit.Native
                 _kpiRepos.Text = _repoList == null ? "—" : _repoList.Items.Count.ToString();
             }
             if (_kpiServices != null) _kpiServices.Text = _upCount + "/3";
+
+            if (_statsLabel != null)
+            {
+                _statsLabel.Text = "项目 " + list.Count + "  ·  仓库 " + (_repoList == null ? 0 : _repoList.Items.Count) + "  ·  脚本 " + total;
+            }
         }
 
         private void RefreshProjects()
@@ -883,6 +904,7 @@ namespace WorkKit.Native
             if (_projectList.Items.Count > 0 && _projectList.SelectedItems.Count == 0)
             {
                 _projectList.Items[0].Selected = true;
+                ShowProjectDetail();
             }
         }
 
@@ -1442,86 +1464,4 @@ namespace WorkKit.Native
         }
     }
 
-    /// <summary>ListView 自绘：深色表头 + 交替行 + 选中高亮。</summary>
-    internal static class Draw
-    {
-        internal static void List(ListView control)
-        {
-            control.DrawColumnHeader += delegate(object s, DrawListViewColumnHeaderEventArgs e)
-            {
-                using (SolidBrush brush = new SolidBrush(Theme.Card))
-                {
-                    e.Graphics.FillRectangle(brush, e.Bounds);
-                }
-                using (Pen pen = new Pen(Theme.Border))
-                {
-                    e.Graphics.DrawLine(pen, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
-                }
-                TextRenderer.DrawText(
-                    e.Graphics, e.Header.Text, Theme.SmallBold, e.Bounds, Theme.Dim,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            };
-
-            control.DrawItem += delegate(object s, DrawListViewItemEventArgs e)
-            {
-                // 必须显式关掉默认绘制：只置 OwnerDraw=true 时，系统仍会在
-                // 「获得焦点 / 首次点击」这类时机用默认高亮色画一遍选中行，
-                // 表现就是「点进去变系统蓝，鼠标划过才恢复自定义色」。
-                e.DrawDefault = false;
-
-                bool selected = e.Item.Selected || (e.State & ListViewItemStates.Selected) != 0;
-                Color back = selected ? Theme.AccentSoft : (e.ItemIndex % 2 == 0 ? Theme.Panel : Theme.Card);
-
-                // 铺满整行宽度：列宽之和通常小于客户区，右侧空白不填就会露出系统底色
-                int rowWidth = Math.Max(control.ClientSize.Width, e.Bounds.Right);
-                using (SolidBrush brush = new SolidBrush(back))
-                {
-                    e.Graphics.FillRectangle(brush, new Rectangle(0, e.Bounds.Top, rowWidth, e.Bounds.Height));
-                }
-                if (selected)
-                {
-                    using (Pen pen = new Pen(Theme.Accent))
-                    {
-                        e.Graphics.DrawLine(pen, 0, e.Bounds.Top, 0, e.Bounds.Bottom);
-                    }
-                }
-            };
-
-            control.DrawSubItem += delegate(object s, DrawListViewSubItemEventArgs e)
-            {
-                e.DrawDefault = false;
-
-                // 用 Item.Selected 而不是 ItemState：后者在部分重绘路径上不准，
-                // 会导致选中行某些列仍按「未选中」上色，看起来花屏。
-                bool selected = e.Item.Selected;
-                Color back = selected ? Theme.AccentSoft : (e.ItemIndex % 2 == 0 ? Theme.Panel : Theme.Card);
-                using (SolidBrush brush = new SolidBrush(back))
-                {
-                    e.Graphics.FillRectangle(brush, e.Bounds);
-                }
-                Color fore = e.Item.ForeColor == Color.Empty || e.Item.ForeColor == Theme.Text
-                    ? Theme.Text
-                    : e.Item.ForeColor;
-                TextRenderer.DrawText(
-                    e.Graphics, e.SubItem.Text, Theme.Small,
-                    new Rectangle(e.Bounds.X + 2, e.Bounds.Y, e.Bounds.Width - 4, e.Bounds.Height),
-                    fore,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            };
-
-            // 选中项变化后全量重绘一次。
-            // ListView 在选项切换时只重绘变化区域，配合 OwnerDraw 容易出现
-            // 「某几列还是旧颜色」的残留，Invalidate 一次最省事。
-            control.SelectedIndexChanged += delegate { control.Invalidate(); };
-
-            control.Resize += delegate
-            {
-                if (control.Columns.Count == 0) return;
-                int fixedWidth = 0;
-                for (int i = 0; i < control.Columns.Count - 1; i += 1) fixedWidth += control.Columns[i].Width;
-                int last = control.ClientSize.Width - fixedWidth - 24;
-                if (last > 120) control.Columns[control.Columns.Count - 1].Width = last;
-            };
-        }
-    }
 }

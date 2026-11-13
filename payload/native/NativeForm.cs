@@ -67,6 +67,8 @@ namespace WorkKit.Native
         private DateTime _lastTick = DateTime.MinValue;
         private int _failStreak;
         private int _upCount = 3;
+        private int _estTokens;
+        private int _usageEvents;
         private string _lastStatusText = "";
 
         // ---------------------------------------------------------- 概览卡片
@@ -100,6 +102,11 @@ namespace WorkKit.Native
         private Label _kpiProcs;
         private Label _kpiCpu;
         private Label _kpiMem;
+        private Panel _cpuChart;
+        private Panel _memChart;
+        private readonly List<double> _cpuHistory = new List<double>();
+        private readonly List<double> _memHistory = new List<double>();
+        private const int HISTORY_LIMIT = 40;
         private ListView _procList;
         private Label _guardLabel;
 
@@ -503,6 +510,28 @@ namespace WorkKit.Native
             return panel;
         }
 
+        /// <summary>迷你趋势图容器：自绘 Panel，一个控件画完整张图。</summary>
+        private Panel MakeChart(Panel parent, int x, int y, string caption)
+        {
+            Panel chart = new Panel();
+            chart.Bounds = new Rectangle(x, y, 150, 84);
+            chart.BackColor = Theme.Card;
+            chart.Tag = caption;
+            chart.Paint += delegate(object s, PaintEventArgs e)
+            {
+                bool isCpu = ((Panel)s).Tag as string == "CPU 趋势";
+                List<double> data = isCpu ? _cpuHistory : _memHistory;
+                string current = isCpu
+                    ? (data.Count > 0 ? Math.Round(data[data.Count - 1], 1) + "%" : "-")
+                    : (data.Count > 0 ? Math.Round(data[data.Count - 1], 0) + " MB" : "-");
+                Draw.Sparkline(
+                    e.Graphics, ((Panel)s).ClientRectangle, data,
+                    isCpu ? Theme.Ok : Theme.Accent, (string)((Panel)s).Tag, current);
+            };
+            parent.Controls.Add(chart);
+            return chart;
+        }
+
         private Label MakeCard(Panel parent, int x, int y, string caption, string value)
         {
             Panel card = new Panel();
@@ -728,6 +757,9 @@ namespace WorkKit.Native
             _kpiCpu = MakeCard(panel, 380, 60, "CPU", "—");
             _kpiMem = MakeCard(panel, 570, 60, "内存", "—");
 
+            _cpuChart = MakeChart(panel, 760, 60, "CPU 趋势");
+            _memChart = MakeChart(panel, 922, 60, "内存趋势");
+
             _guardLabel = Ui.Text("", Theme.Small, Theme.Ok);
             _guardLabel.Bounds = new Rectangle(0, 158, 760, 22);
             panel.Controls.Add(_guardLabel);
@@ -793,8 +825,9 @@ namespace WorkKit.Native
 
             if (_footRight != null)
             {
-                _footRight.Text = "端口 " + _port + " / " + _pulse + " / " + _tuner + " · " +
-                    DateTime.Now.ToString("HH:mm:ss");
+                _footRight.Text = string.Format(
+                    "端口 {0} / {1} / {2} · 事件 {3} · ~{4} token · {5}",
+                    _port, _pulse, _tuner, _usageEvents, _estTokens, DateTime.Now.ToString("HH:mm:ss"));
             }
         }
 
@@ -1030,6 +1063,12 @@ namespace WorkKit.Native
             Dictionary<string, object> summary = Api.Map(state, "summary");
             List<object> processes = Api.AsList(state.ContainsKey("processes") ? state["processes"] : null);
             Dictionary<string, object> guard = Api.Map(state, "guard");
+            Dictionary<string, object> usage = Api.Map(state, "usage");
+            if (usage != null)
+            {
+                _usageEvents = Api.Int(usage, "events", 0);
+                _estTokens = Api.Int(usage, "estTokens", 0);
+            }
 
             if (_kpiJobs != null) _kpiJobs.Text = Api.Int(summary, "running", 0).ToString();
             if (_kpiProcs != null) _kpiProcs.Text = processes.Count.ToString();
@@ -1044,7 +1083,15 @@ namespace WorkKit.Native
                 memMb += Api.Dbl(map, "memMB", 0);
             }
             if (_kpiCpu != null) _kpiCpu.Text = Math.Round(cpu, 1) + "%";
+
+            // 趋势线：只保留最近 HISTORY_LIMIT 次采样，内存占用恒定
+            _cpuHistory.Add(cpu);
+            while (_cpuHistory.Count > HISTORY_LIMIT) _cpuHistory.RemoveAt(0);
+            if (_cpuChart != null) _cpuChart.Invalidate();
             if (_kpiMem != null) _kpiMem.Text = Math.Round(memMb, 0) + " MB";
+            _memHistory.Add(memMb);
+            while (_memHistory.Count > HISTORY_LIMIT) _memHistory.RemoveAt(0);
+            if (_memChart != null) _memChart.Invalidate();
 
             if (_guardLabel != null && guard != null)
             {

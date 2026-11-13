@@ -356,6 +356,72 @@ namespace WorkKit.Native
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         }
 
+        /// <summary>
+        /// 迷你趋势线。只画折线 + 填充，不建控件、不建 Bitmap ——
+        /// 直接在当前 Graphics 上画，每帧零额外 GDI 对象。
+        /// </summary>
+        internal static void Sparkline(
+            Graphics g, Rectangle bounds, IList<double> values, Color color, string caption, string current)
+        {
+            g.FillRectangle(Theme.Brush(Theme.Card), bounds);
+            g.DrawRectangle(Theme.Pen(Theme.Border), bounds.Left, bounds.Top, bounds.Width - 1, bounds.Height - 1);
+
+            TextRenderer.DrawText(
+                g, caption, Theme.Tiny,
+                new Rectangle(bounds.Left + 9, bounds.Top + 6, bounds.Width - 16, 16),
+                Theme.Faint,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+
+            TextRenderer.DrawText(
+                g, current, Theme.SmallBold,
+                new Rectangle(bounds.Left + 9, bounds.Top + 22, bounds.Width - 16, 18),
+                color,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+
+            Rectangle plot = new Rectangle(
+                bounds.Left + 9, bounds.Top + 44, bounds.Width - 18, bounds.Height - 52);
+            if (plot.Width < 10 || plot.Height < 8) return;
+
+            if (values == null || values.Count < 2)
+            {
+                TextRenderer.DrawText(
+                    g, "采样中…", Theme.Tiny, plot, Theme.Faint,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                return;
+            }
+
+            double max = 0.0001;
+            foreach (double value in values) if (value > max) max = value;
+            // 留 15% 顶部余量，曲线不会贴着上边框
+            max *= 1.15;
+
+            Point[] points = new Point[values.Count];
+            double stepX = plot.Width / (double)(values.Count - 1);
+            for (int i = 0; i < values.Count; i += 1)
+            {
+                double ratio = Math.Max(0, Math.Min(1, values[i] / max));
+                points[i] = new Point(
+                    plot.Left + (int)Math.Round(i * stepX),
+                    plot.Bottom - (int)Math.Round(ratio * (plot.Height - 2)));
+            }
+
+            // 面积填充（浅色）+ 折线（实色）
+            using (SolidBrush area = new SolidBrush(Color.FromArgb(38, color)))
+            {
+                System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
+                path.AddLines(points);
+                path.AddLine(points[points.Length - 1].X, plot.Bottom, points[0].X, plot.Bottom);
+                path.CloseFigure();
+                g.FillPath(area, path);
+                path.Dispose();
+            }
+            g.DrawLines(Theme.Pen(color, 1.4F), points);
+
+            // 末端点，强调「当前值」
+            Point last = points[points.Length - 1];
+            g.FillEllipse(Theme.Brush(color), last.X - 2, last.Y - 2, 5, 5);
+        }
+
         /// <summary>分区标题：左侧 3px 竖条 + 粗体标题（对齐网页「构建逻辑」卡片）。</summary>
         internal static void SectionHeader(Graphics g, int x, int y, int width, string title)
         {

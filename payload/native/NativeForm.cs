@@ -877,6 +877,12 @@ namespace WorkKit.Native
                 _projectList.Items.Add(row);
             }
             _projectList.EndUpdate();
+
+            // 默认选中第一行，右侧详情不至于空着
+            if (_projectList.Items.Count > 0 && _projectList.SelectedItems.Count == 0)
+            {
+                _projectList.Items[0].Selected = true;
+            }
         }
 
         private void RefreshScripts()
@@ -986,6 +992,11 @@ namespace WorkKit.Native
                 _repoList.Items.Add(row);
             }
             _repoList.EndUpdate();
+
+            if (_repoList.Items.Count > 0 && _repoList.SelectedItems.Count == 0)
+            {
+                _repoList.Items[0].Selected = true;
+            }
         }
 
         private void RefreshPulse()
@@ -1452,24 +1463,36 @@ namespace WorkKit.Native
 
             control.DrawItem += delegate(object s, DrawListViewItemEventArgs e)
             {
-                bool selected = (e.State & ListViewItemStates.Selected) != 0;
+                // 必须显式关掉默认绘制：只置 OwnerDraw=true 时，系统仍会在
+                // 「获得焦点 / 首次点击」这类时机用默认高亮色画一遍选中行，
+                // 表现就是「点进去变系统蓝，鼠标划过才恢复自定义色」。
+                e.DrawDefault = false;
+
+                bool selected = e.Item.Selected || (e.State & ListViewItemStates.Selected) != 0;
                 Color back = selected ? Theme.AccentSoft : (e.ItemIndex % 2 == 0 ? Theme.Panel : Theme.Card);
+
+                // 铺满整行宽度：列宽之和通常小于客户区，右侧空白不填就会露出系统底色
+                int rowWidth = Math.Max(control.ClientSize.Width, e.Bounds.Right);
                 using (SolidBrush brush = new SolidBrush(back))
                 {
-                    e.Graphics.FillRectangle(brush, e.Bounds);
+                    e.Graphics.FillRectangle(brush, new Rectangle(0, e.Bounds.Top, rowWidth, e.Bounds.Height));
                 }
                 if (selected)
                 {
                     using (Pen pen = new Pen(Theme.Accent))
                     {
-                        e.Graphics.DrawLine(pen, e.Bounds.Left, e.Bounds.Top, e.Bounds.Left, e.Bounds.Bottom);
+                        e.Graphics.DrawLine(pen, 0, e.Bounds.Top, 0, e.Bounds.Bottom);
                     }
                 }
             };
 
             control.DrawSubItem += delegate(object s, DrawListViewSubItemEventArgs e)
             {
-                bool selected = (e.ItemState & ListViewItemStates.Selected) != 0;
+                e.DrawDefault = false;
+
+                // 用 Item.Selected 而不是 ItemState：后者在部分重绘路径上不准，
+                // 会导致选中行某些列仍按「未选中」上色，看起来花屏。
+                bool selected = e.Item.Selected;
                 Color back = selected ? Theme.AccentSoft : (e.ItemIndex % 2 == 0 ? Theme.Panel : Theme.Card);
                 using (SolidBrush brush = new SolidBrush(back))
                 {
@@ -1479,9 +1502,16 @@ namespace WorkKit.Native
                     ? Theme.Text
                     : e.Item.ForeColor;
                 TextRenderer.DrawText(
-                    e.Graphics, e.SubItem.Text, Theme.Small, e.Bounds, fore,
+                    e.Graphics, e.SubItem.Text, Theme.Small,
+                    new Rectangle(e.Bounds.X + 2, e.Bounds.Y, e.Bounds.Width - 4, e.Bounds.Height),
+                    fore,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             };
+
+            // 选中项变化后全量重绘一次。
+            // ListView 在选项切换时只重绘变化区域，配合 OwnerDraw 容易出现
+            // 「某几列还是旧颜色」的残留，Invalidate 一次最省事。
+            control.SelectedIndexChanged += delegate { control.Invalidate(); };
 
             control.Resize += delegate
             {

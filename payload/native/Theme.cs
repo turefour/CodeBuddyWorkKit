@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -18,7 +18,7 @@ namespace WorkKit.Native
         internal static readonly Color Dim = Color.FromArgb(0x8A, 0x98, 0xAA);
         internal static readonly Color Faint = Color.FromArgb(0x5E, 0x6B, 0x7C);
         internal static readonly Color Accent = Color.FromArgb(0x2E, 0x75, 0xB6);
-        internal static readonly Color AccentSoft = Color.FromArgb(0x1C, 0x3A, 0x5A);
+        internal static readonly Color AccentSoft = Color.FromArgb(0x24, 0x4A, 0x76);
         internal static readonly Color Ok = Color.FromArgb(0x4C, 0xA6, 0x72);
         internal static readonly Color Warn = Color.FromArgb(0xE0, 0xA8, 0x3E);
         internal static readonly Color Err = Color.FromArgb(0xD0, 0x54, 0x54);

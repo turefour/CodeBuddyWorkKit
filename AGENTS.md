@@ -102,8 +102,39 @@ Expand-Archive CodeBuddyWorkKit-1.0.0.zip -DestinationPath $stage
 powershell -File "$target\tools\test-deploy.ps1" -Target $target   # 要 18 项全过
 ```
 
-## 版本约定
+## 版本与更新日志
 
-- 版本号唯一来源：`payload/VERSION`（打包时写入，`deploy.ps1` 读它写进目标机 `deploy.json`）
-- 检测已装版本：`tools\check-install.ps1`，退出码 `0=未装 1=同版本 2=可升级 3=降级`
-- 安装位置登记在注册表 `HKCU\Software\CodeBuddyWorkKit`
+**当前版本 1.0.0**。版本号唯一来源是 `payload/VERSION`，对外说明在 `CHANGELOG.md`。
+两处**必须同步**，用一条命令改：
+
+```powershell
+powershell -File build\bump-version.ps1 -Kind patch -Note "修复 XX 失效"   # 1.0.0 -> 1.0.1
+powershell -File build\bump-version.ps1 -Kind minor -Note "新增 ZZ 能力"   # 1.0.0 -> 1.1.0
+powershell -File build\bump-version.ps1 -Kind major -Note "部署结构改为 ..." # 1.0.0 -> 2.0.0
+```
+
+### 什么时候升
+
+| 变化 | 位数 | 判定 |
+|---|---|---|
+| 修 bug、改文案、调参数 | PATCH | 用法没变 |
+| **新增功能**、大范围优化 | MINOR | 多了能力，但装法/用法不变 |
+| 不兼容变更 | MAJOR | 部署结构、配置格式、回退方式变了 |
+
+判定标准只有一条：**目标机上的使用方式有没有变**。
+装完还是双击快捷方式、还是那几个端口、旧 `deploy.json` 还能直接用 → 不是 MAJOR。
+
+### 硬性要求
+
+1. **新增功能必须同时升 minor + 写 CHANGELOG**，不能只改代码
+2. 升完版本**必须重新打包**，否则包里还是旧 `VERSION`
+3. 不要在 CHANGELOG 里写「内部重构」这类目标机无感的内容 —— 那是 git log 的事
+4. 打包会自动把 `CHANGELOG.md` 复制成目标机的 `docs\更新日志.md`
+
+### 版本相关工具
+
+| 工具 | 用途 |
+|---|---|
+| `tools\check-install.ps1` | 检测已装版本，退出码 `0=未装 1=同版本 2=可升级 3=降级` |
+| 注册表 `HKCU\Software\CodeBuddyWorkKit` | 记录安装位置与版本 |
+| 原生窗口顶部状态条 | 安装前显示「已装 v1.0.0（2026-11-13 部署）」 |

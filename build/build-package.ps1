@@ -237,6 +237,17 @@ if (Test-Path $nativeExe) {
 
 # ------------------------------------------------------------------ 5. 打包
 Say ''
+# 更新日志带进包：目标机上想知道「这一版有什么」时不该再回来翻仓库
+$changelog = Join-Path $KitRoot 'CHANGELOG.md'
+if (Test-Path $changelog) {
+  $docsDir = Join-Path $Payload 'docs'
+  New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
+  Copy-Item $changelog (Join-Path $docsDir '更新日志.md') -Force
+  Say '  [ok]   docs\更新日志.md' 'Green'
+} else {
+  Say '  [warn] 未找到 CHANGELOG.md' 'Yellow'
+}
+
 Say '  [5/5] 生成压缩包' 'Cyan'
 
 if ($Out -eq '') {

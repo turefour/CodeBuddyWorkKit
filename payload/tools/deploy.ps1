@@ -30,6 +30,17 @@ $ErrorActionPreference = 'Stop'
 
 $PayloadRoot = Resolve-Path (Join-Path $PSScriptRoot '..') | Select-Object -ExpandProperty Path
 $Target = [System.IO.Path]::GetFullPath($Target)
+
+# 版本号唯一来源：payload\VERSION（build 时写入）。写在 deploy.json 里，
+# 下次安装时 check-install.ps1 就能比对出「同版本 / 可升级 / 降级」。
+$VersionFile = Join-Path $PayloadRoot 'VERSION'
+$PackageVersion = if (Test-Path $VersionFile) {
+  (Get-Content $VersionFile -Raw -Encoding UTF8).Trim()
+} else {
+  '1.0.0'
+}
+
+$REG_PATH = 'HKCU:\Software\CodeBuddyWorkKit'
 $log = New-Object System.Collections.Generic.List[string]
 
 function Say {
@@ -175,10 +186,22 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 
 if ((Test-Path $configFile) -and -not $ResetConfig) {
   Say '  [keep] config\deploy.json 已存在，保留原配置（-ResetConfig 可覆盖）' 'DarkYellow'
-  $config = Get-Content $configFile -Raw | ConvertFrom-Json
+  $config = Get-Content $configFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  $oldVersion = [string]$config.version
+  # 升级场景：端口/监听地址沿用，版本号与部署时间更新为新包
+  if ($oldVersion -ne $PackageVersion) {
+    $config.version = $PackageVersion
+    $config.deployedAt = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
+    [System.IO.File]::WriteAllText(
+      $configFile,
+      ($config | ConvertTo-Json -Depth 5),
+      (New-Object System.Text.UTF8Encoding $false)
+    )
+    Say ("  [up]   {0} -> {1}" -f $oldVersion, $PackageVersion) 'Green'
+  }
 } else {
   $config = [pscustomobject]@{
-    version    = '1.0.0'
+    version    = $PackageVersion
     host       = $(if ($Lan) { '0.0.0.0' } else { '127.0.0.1' })
     lan        = [bool]$Lan
     ports      = [pscustomobject]@{ codevault = $Port; pulse = $PulsePort; tuner = $TunerPort }
@@ -321,6 +344,17 @@ if (-not $NoRules) {
 }
 
 # ------------------------------------------------------------------ 5. 完成
+# 记录安装位置：否则换个目录再装一次，两边都不知道对方存在
+try {
+  New-Item -Path $REG_PATH -Force | Out-Null
+  Set-ItemProperty -Path $REG_PATH -Name 'InstallPath' -Value $Target
+  Set-ItemProperty -Path $REG_PATH -Name 'Version' -Value $PackageVersion
+  Set-ItemProperty -Path $REG_PATH -Name 'InstalledAt' -Value (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
+  Say ("  [ok]   已登记安装位置（{0}，版本 {1}）" -f $REG_PATH, $PackageVersion) 'Green'
+} catch {
+  Say ('  [warn] 注册表登记失败：' + $_.Exception.Message) 'Yellow'
+}
+
 Say ''
 Say '  [5/5] 部署完成' 'Cyan'
 Say ("  部署目录：{0}" -f $Target) 'White'

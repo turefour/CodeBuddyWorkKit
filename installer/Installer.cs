@@ -30,6 +30,7 @@ namespace CodeBuddyWorkKit
     {
         internal static string PayloadDir;
         internal static string ToolsDir;
+        internal static string PackageVersion = "0.0.0";
         internal static bool Silent;
         internal static string TargetDir;
         internal static int PortCodevault = 47910;
@@ -59,6 +60,22 @@ namespace CodeBuddyWorkKit
             {
                 Console.Error.WriteLine("安装包不完整：找不到 payload\\tools\\deploy.ps1");
                 return 2;
+            }
+
+            // The version shown to the user and compared against an existing
+            // install comes from payload\VERSION, never from a hard-coded string.
+            try
+            {
+                string versionFile = Path.Combine(PayloadDir, "VERSION");
+                if (File.Exists(versionFile))
+                {
+                    string text = File.ReadAllText(versionFile, Encoding.UTF8).Trim();
+                    if (text.Length > 0) PackageVersion = text;
+                }
+            }
+            catch
+            {
+                /* keep 0.0.0 */
             }
 
             if (Silent) return RunSilent();
@@ -263,6 +280,26 @@ namespace CodeBuddyWorkKit
         private readonly Label _status;
         private bool _envPassed;
         private bool _busy;
+
+        // Filled by check-install.ps1: "not-installed" | "same" | "upgrade" | "downgrade"
+        private string _installState = "not-installed";
+        private string _installedVersion = "";
+
+        /** One-line summary of what this run will do, shown next to the buttons. */
+        private string InstallStateText()
+        {
+            switch (_installState)
+            {
+                case "same":
+                    return "已装 v" + _installedVersion + "（本包 v" + Program.PackageVersion + "，将重装）";
+                case "upgrade":
+                    return "升级 v" + _installedVersion + " → v" + Program.PackageVersion;
+                case "downgrade":
+                    return "降级 v" + _installedVersion + " → v" + Program.PackageVersion;
+                default:
+                    return "首次安装 v" + Program.PackageVersion;
+            }
+        }
 
         internal InstallerForm()
         {
@@ -507,15 +544,36 @@ namespace CodeBuddyWorkKit
             SetBusy(true, "正在检测环境…");
             _envPassed = false;
             AppendLog("");
-            AppendLog("===== 环境检测 =====");
+            AppendLog("===== 安装状态检测 =====");
 
             ThreadPool.QueueUserWorkItem(delegate
             {
+                // (1) Already installed? which version? upgrade or reinstall?
+                PsResult install = Ps.Run("check-install.ps1", "-Target \"" + Program.TargetDir + "\"", AppendLog, false);
+                Dictionary<string, object> info = Ps.LastJson(install.StdOut);
+                string state = "not-installed";
+                string installedVersion = "";
+                if (info != null)
+                {
+                    if (info.ContainsKey("state")) state = Convert.ToString(info["state"]);
+                    object rawInstalled;
+                    if (info.TryGetValue("installed", out rawInstalled))
+                    {
+                        Dictionary<string, object> map = rawInstalled as Dictionary<string, object>;
+                        if (map != null && map.ContainsKey("version")) installedVersion = Convert.ToString(map["version"]);
+                    }
+                }
+
+                AppendLog("");
+                AppendLog("===== 环境检测 =====");
                 PsResult r = Ps.Run("check-env.ps1", Program.BuildEnvArgs(), AppendLog, false);
                 Dictionary<string, object> json = Ps.LastJson(r.StdOut);
 
                 BeginInvoke(new Action(delegate
                 {
+                    _installState = state;
+                    _installedVersion = installedVersion;
+
                     bool ok = r.ExitCode == 0;
                     int blocks = 0;
                     int warns = 0;
@@ -526,7 +584,7 @@ namespace CodeBuddyWorkKit
                     }
                     _envPassed = ok;
                     SetBusy(false, ok
-                        ? string.Format("环境检测通过（{0} 项提示），可以安装", warns)
+                        ? string.Format("{0}｜环境检测通过（{1} 项提示）", InstallStateText(), warns)
                         : string.Format("环境检测未通过：{0} 项阻塞", blocks));
 
                     if (ok)
@@ -562,8 +620,9 @@ namespace CodeBuddyWorkKit
             SyncOptions();
 
             string message = string.Format(
-                "即将安装到：\n{0}\n\n索引库端口 {1}　看板 {2}　降温 {3}\n{4}\n\n确认开始安装？",
-                Program.TargetDir, Program.PortCodevault, Program.PortPulse, Program.PortTuner,
+                "即将安装到：\n{0}\n\n方式：{1}\n索引库端口 {2}　看板 {3}　降温 {4}\n{5}\n\n确认开始安装？",
+                Program.TargetDir, InstallStateText(),
+                Program.PortCodevault, Program.PortPulse, Program.PortTuner,
                 Program.AllowLan ? "监听 0.0.0.0（局域网可访问）" : "仅本机访问");
             if (MessageBox.Show(this, message, "确认安装", MessageBoxButtons.OKCancel, MessageBoxIcon.Question)
                 != DialogResult.OK)

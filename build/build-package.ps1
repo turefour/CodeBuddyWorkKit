@@ -101,11 +101,21 @@ foreach ($name in @('codevault', 'pulse', 'tuner', 'scriptvault')) {
   $total += Copy-Filtered -Source $Sources[$name] -Destination (Join-Path $AppsDir $name) -Label $name
 }
 
-# ------------------------------------------------------------------ 1b. 清空本机数据
+# ------------------------------------------------------------------ 1b. 版本号
+# VERSION 是版本检测的唯一来源：check-install.ps1 靠它判断「本包版本」，
+# deploy.ps1 把它写进目标机的 deploy.json，两者才能比较。
+Say ''
+Say '  [1b/5] 写入版本号' 'Cyan'
+$VersionFile = Join-Path $Payload 'VERSION'
+$PackageVersion = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw -Encoding UTF8).Trim() } else { '0.0.0' }
+[System.IO.File]::WriteAllText($VersionFile, $PackageVersion + "`n", (New-Object System.Text.UTF8Encoding $false))
+Say ("  [ok]   VERSION = {0}" -f $PackageVersion) 'Green'
+
+# ------------------------------------------------------------------ 1c. 清空本机数据
 # 分发包不能带自己的项目索引与仓库清单：目标机上这些路径不存在，索引页会显示
 # 一堆打不开的项目，也会把本机目录结构泄露出去。部署后由 adopt-project 重新登记。
 Say ''
-Say '  [1b/5] 清空本机私有数据' 'Cyan'
+Say '  [1c/5] 清空本机私有数据' 'Cyan'
 
 $projectsFile = Join-Path $AppsDir 'codevault\data\projects.json'
 if (Test-Path $projectsFile) {

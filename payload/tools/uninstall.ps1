@@ -88,6 +88,26 @@ try {
   Add-Step '桌面快捷方式' 'fail' $_.Exception.Message
 }
 
+# ------------------------------------------------------------------ 2b. 注册表登记
+$REG_PATH = 'HKCU:\Software\CodeBuddyWorkKit'
+try {
+  if (Test-Path $REG_PATH) {
+    $reg = Get-ItemProperty -Path $REG_PATH -ErrorAction SilentlyContinue
+    $recorded = if ($reg -and $reg.InstallPath) { [string]$reg.InstallPath } else { '' }
+    # 只有当登记的就是本次要卸载的目录时才删，避免卸载 A 目录把 B 目录的登记抹掉
+    if (-not $recorded -or ($recorded -ieq $Target)) {
+      Remove-Item -Path $REG_PATH -Recurse -Force
+      Add-Step '注册表登记' 'done' '已移除 HKCU\Software\CodeBuddyWorkKit'
+    } else {
+      Add-Step '注册表登记' 'skip' ("登记的是另一个目录：{0}" -f $recorded)
+    }
+  } else {
+    Add-Step '注册表登记' 'skip' '不存在'
+  }
+} catch {
+  Add-Step '注册表登记' 'fail' $_.Exception.Message
+}
+
 # ------------------------------------------------------------------ 3. 规则
 $ruleFile = Join-Path $env:USERPROFILE '.codebuddy\rules\deploy-target.mdc'
 try {

@@ -135,14 +135,24 @@ foreach ($app in @('codevault', 'pulse', 'tuner', 'scriptvault')) {
 $totalFiles += Copy-Tree -Source (Join-Path $PayloadRoot 'tools') -Destination (Join-Path $Target 'tools') -Label 'tools'
 $totalFiles += Copy-Tree -Source (Join-Path $PayloadRoot 'docs') -Destination (Join-Path $Target 'docs') -Label 'docs'
 
-# 桌面壳：把网页装进独立窗口 + 托盘常驻
+# 桌面壳：把网页装进独立窗口 + 托盘常驻（浏览器嵌入版）
 $shellSrc = Join-Path $PayloadRoot 'shell\CodeBuddyWorkKit.Shell.exe'
 if (Test-Path $shellSrc) {
   Copy-Item $shellSrc (Join-Path $Target 'CodeBuddyWorkKit.Shell.exe') -Force
-  Say '  [ok]   CodeBuddyWorkKit.Shell.exe（独立窗口 + 托盘）' 'Green'
+  Say '  [ok]   CodeBuddyWorkKit.Shell.exe（浏览器嵌入版）' 'Green'
   $totalFiles += 1
 } else {
   Say '  [warn] 未找到桌面壳，将退回用浏览器打开' 'Yellow'
+}
+
+# 原生窗口（纯 WinForms，不依赖任何浏览器）
+$nativeSrc = Join-Path $PayloadRoot 'native\CodeBuddyWorkKit.Native.exe'
+if (Test-Path $nativeSrc) {
+  Copy-Item $nativeSrc (Join-Path $Target 'CodeBuddyWorkKit.Native.exe') -Force
+  Say '  [ok]   CodeBuddyWorkKit.Native.exe（原生窗口，无需浏览器）' 'Green'
+  $totalFiles += 1
+} else {
+  Say '  [warn] 未找到原生窗口程序' 'Yellow'
 }
 
 # runtime（便携 node + git，可选）：整个目录一起带过去
@@ -297,9 +307,25 @@ if (-not $NoDesktop) {
     $linkPath = Join-Path $desktop 'CodeBuddy 工作套件.lnk'
     $link = $com.CreateShortcut($linkPath)
 
+    $nativeExe = Join-Path $Target 'CodeBuddyWorkKit.Native.exe'
     $shellExe = Join-Path $Target 'CodeBuddyWorkKit.Shell.exe'
-    if (Test-Path $shellExe) {
-      # 独立窗口：不起控制台、最小化进托盘
+
+    if (Test-Path $nativeExe) {
+      # 默认给原生版：启动最快、不依赖 Edge
+      $link.TargetPath = $nativeExe
+      $link.WindowStyle = 1
+      $link.Description = 'CodeBuddy 工作套件（原生窗口）'
+
+      # 再给一个浏览器嵌入版的快捷方式，两种形态都留着
+      if (Test-Path $shellExe) {
+        $link2 = $com.CreateShortcut((Join-Path $desktop 'CodeBuddy 工作套件（浏览器版）.lnk'))
+        $link2.TargetPath = $shellExe
+        $link2.WorkingDirectory = $Target
+        $link2.WindowStyle = 1
+        $link2.Description = 'CodeBuddy 工作套件（浏览器嵌入版）'
+        $link2.Save()
+      }
+    } elseif (Test-Path $shellExe) {
       $link.TargetPath = $shellExe
       $link.WindowStyle = 1
       $link.Description = 'CodeBuddy 工作套件（独立窗口）'

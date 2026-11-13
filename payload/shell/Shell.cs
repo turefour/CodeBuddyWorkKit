@@ -43,6 +43,19 @@ namespace CodeBuddyWorkKit
         /// </summary>
         internal static EventWaitHandle ShowSignal;
 
+        /// <summary>Raised for uncaught exceptions so the main window can show them.</summary>
+        internal static event Action<string, string> GlobalError;
+
+        internal static void ReportGlobal(string source, Exception ex)
+        {
+            Action<string, string> handler = GlobalError;
+            if (handler != null)
+            {
+                try { handler(source, ex == null ? "未知异常" : ex.Message); } catch { }
+            }
+            ShellForm.Log("GLOBAL " + source + ": " + ex);
+        }
+
         [STAThread]
         internal static int Main(string[] args)
         {
@@ -70,6 +83,17 @@ namespace CodeBuddyWorkKit
             }
 
             ShowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "CodeBuddyWorkKit.Show");
+
+            // 兜住所有未捕获异常：写日志 + 进报错列表，而不是静默退出
+            Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+            {
+                ReportGlobal("界面异常", e.Exception);
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+            {
+                ReportGlobal("未捕获异常", e.ExceptionObject as Exception);
+            };
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -136,6 +160,23 @@ namespace CodeBuddyWorkKit
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+        [DllImport("user32.dll")]
+        private static extern bool InvalidateRect(IntPtr hWnd, IntPtr rect, bool erase);
+
+        [DllImport("user32.dll")]
+        private static extern bool UpdateWindow(IntPtr hWnd);
+
+        private struct RECT
+        {
+            internal int Left;
+            internal int Top;
+            internal int Right;
+            internal int Bottom;
+        }
+
         private const int GWL_STYLE = -16;
         private const int WS_CAPTION = 0x00C00000;
         private const int WS_THICKFRAME = 0x00040000;
@@ -158,11 +199,33 @@ namespace CodeBuddyWorkKit
         private IntPtr _pageHwnd = IntPtr.Zero;
         private bool _embedded;
         private NotifyIcon _tray;
+
+        // ---- 顶部工具条 / 错误上报 / 健康自检 -------------------------------
+        private sealed class ShellError
+        {
+            internal DateTime At;
+            internal string Source = "";
+            internal string Message = "";
+        }
+
+        private const int TOP_BAR_HEIGHT = 42;
+
+        private readonly List<ShellError> _errors = new List<ShellError>();
+        private Panel _topBar;
+        private Label _statusLabel;
+        private Panel _errorButton;
+        private Label _errorBadge;
+        private Label _errorText;
+        private System.Windows.Forms.Timer _healthTimer;
+        private DateTime _lastHealthTick = DateTime.MinValue;
+        private int _healthFailStreak;
+        private int _lastDownCount = -1;
         private bool _closingForReal;
         private bool _stopServicesOnExit;
         private System.Windows.Forms.Timer _attachTimer;
         private DateTime _attachDeadline;
         private HashSet<uint> _preExistingEdge = new HashSet<uint>();
+        private string _profileDir = "";
 
         // --- guard notifications (Pulse 的重复进程告警推到托盘气泡)
         private sealed class GuardAlert
@@ -201,6 +264,7 @@ namespace CodeBuddyWorkKit
             Font = new Font("Microsoft YaHei UI", 9F);
             try { Icon = SystemIcons.Application; } catch { }
 
+            BuildTopBar();
             BuildTray();
             Load += OnLoaded;
             Resize += OnResized;
@@ -236,6 +300,10 @@ namespace CodeBuddyWorkKit
             watcher.Start();
 
             StartGuardWatcher();
+            StartHealthWatch();
+
+            // 未捕获异常也进报错列表，而不是弹一个没人看的对话框
+            ShellProgram.GlobalError += AddError;
         }
 
         /// <summary>CLI overrides, mainly so the shell can be tested without a deploy.json.</summary>
@@ -733,6 +801,9 @@ namespace CodeBuddyWorkKit
             finally
             {
                 Cursor = Cursors.Default;
+                // 构造时 TopBar 尺寸还没定，按钮会落在负坐标；这里补一次布局
+                LayoutTopBar();
+                if (_topBar != null) _topBar.BringToFront();
             }
         }
 
@@ -756,6 +827,7 @@ namespace CodeBuddyWorkKit
 
             _closingForReal = true;
             KillEdge();
+            CleanupProfile();
             if (_tray != null)
             {
                 _tray.Visible = false;
@@ -907,6 +979,15 @@ namespace CodeBuddyWorkKit
                     {
                         return true;
                     }
+
+                    // 尺寸校验：--app 窗口是我们指定的 1320x860；用户自己的浏览窗口
+                    // 尺寸随机，标题却可能同样是 "CodeVault"。不校验就会嵌错窗口。
+                    RECT rect;
+                    if (!GetWindowRect(hWnd, out rect)) return true;
+                    int width = rect.Right - rect.Left;
+                    int height = rect.Bottom - rect.Top;
+                    if (width < 900 || height < 500) return true;
+
                     found = hWnd;
                     return false; // stop enumerating
                 },
@@ -983,9 +1064,721 @@ namespace CodeBuddyWorkKit
             }
         }
 
+        // ================================================================ 顶部工具条
+
+        /// <summary>
+        /// 顶部工具条：状态文字 + 报错按钮（带计数徽章）+ 设置按钮。
+        ///
+        /// 为什么一定要单独留一条：嵌入的 Edge 窗口是另一个进程的 HWND，永远画在
+        /// 本窗体控件之上。按钮如果放在页面区域里会被完全遮住，点了也没反应。
+        /// </summary>
+        private void BuildTopBar()
+        {
+            _topBar = new Panel();
+            _topBar.Dock = DockStyle.Top;
+            _topBar.Height = TOP_BAR_HEIGHT;
+            _topBar.BackColor = Color.FromArgb(24, 32, 44);
+            _topBar.Padding = new Padding(12, 0, 12, 0);
+            _topBar.Resize += delegate { LayoutTopBar(); };
+            Controls.Add(_topBar);
+
+            _statusLabel = new Label();
+            _statusLabel.AutoSize = false;
+            _statusLabel.Bounds = new Rectangle(12, 6, 460, 30);
+            _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+            _statusLabel.ForeColor = Color.FromArgb(148, 164, 184);
+            _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5F);
+            _statusLabel.Text = "正在启动…";
+            _topBar.Controls.Add(_statusLabel);
+
+            // 报错按钮
+            _errorButton = new Panel();
+            _errorButton.Size = new Size(84, 28);
+            _errorButton.BackColor = Color.FromArgb(58, 72, 92);
+            _errorButton.BorderStyle = BorderStyle.FixedSingle;
+            _errorButton.Cursor = Cursors.Hand;
+            _errorButton.Click += delegate { ShowErrorDialog(); };
+            _topBar.Controls.Add(_errorButton);
+
+            _errorText = new Label();
+            _errorText.Text = "报错";
+            _errorText.Dock = DockStyle.Fill;
+            _errorText.TextAlign = ContentAlignment.MiddleCenter;
+            _errorText.ForeColor = Color.FromArgb(150, 158, 170);
+            _errorText.Font = new Font("Microsoft YaHei UI", 8.5F);
+            _errorText.Click += delegate { ShowErrorDialog(); };
+            _errorButton.Controls.Add(_errorText);
+
+            // 数量徽章：贴在按钮右上角
+            _errorBadge = new Label();
+            _errorBadge.AutoSize = false;
+            _errorBadge.Size = new Size(20, 15);
+            _errorBadge.Location = new Point(64, -6);
+            _errorBadge.TextAlign = ContentAlignment.MiddleCenter;
+            _errorBadge.Font = new Font("Microsoft YaHei UI", 7.5F, FontStyle.Bold);
+            _errorBadge.BackColor = Color.FromArgb(198, 58, 58);
+            _errorBadge.ForeColor = Color.White;
+            _errorBadge.Visible = false;
+            _errorBadge.Cursor = Cursors.Hand;
+            _errorBadge.Click += delegate { ShowErrorDialog(); };
+            _errorButton.Controls.Add(_errorBadge);
+            _errorBadge.BringToFront();
+
+            // 设置按钮
+            Button settings = new Button();
+            settings.Text = "设置";
+            settings.Size = new Size(66, 28);
+            settings.FlatStyle = FlatStyle.Flat;
+            settings.FlatAppearance.BorderSize = 0;
+            settings.BackColor = Color.FromArgb(58, 74, 96);
+            settings.FlatAppearance.BorderSize = 1;
+            settings.FlatAppearance.BorderColor = Color.FromArgb(96, 118, 148);
+            settings.ForeColor = Color.FromArgb(224, 234, 246);
+            settings.Font = new Font("Microsoft YaHei UI", 8.5F);
+            settings.Cursor = Cursors.Hand;
+            settings.Tag = "settings";
+            settings.Click += delegate { ShowSettings(); };
+            _topBar.Controls.Add(settings);
+
+            LayoutTopBar();
+        }
+
+        private void LayoutTopBar()
+        {
+            if (_topBar == null) return;
+
+            // 构造阶段 Dock 还没算完，ClientSize 可能是 0，退回用窗体宽度
+            int barWidth = _topBar.ClientSize.Width;
+            if (barWidth < 100) barWidth = Math.Max(400, ClientSize.Width);
+            int right = barWidth - 12;
+
+            foreach (Control control in _topBar.Controls)
+            {
+                if (control is Button && "settings".Equals(control.Tag))
+                {
+                    control.Location = new Point(right - control.Width, (_topBar.Height - control.Height) / 2);
+                    right -= control.Width + 8;
+                }
+            }
+            if (_errorButton != null) _errorButton.Location = new Point(right - _errorButton.Width, (_topBar.Height - _errorButton.Height) / 2);
+            if (_statusLabel != null) _statusLabel.Width = Math.Max(120, right - _errorButton.Width - 24);
+
+            Log(
+                "topbar layout: bar=" + barWidth + "x" + _topBar.Height +
+                " status=" + (_statusLabel == null ? "-" : _statusLabel.Bounds.ToString()) +
+                " error=" + (_errorButton == null ? "-" : _errorButton.Bounds.ToString()));
+        }
+
+        // ================================================================ 错误上报
+
+        /// <summary>记录一条错误/告警，重复内容 30 秒内只记一次。</summary>
+        private void AddError(string source, string message)
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(delegate { AddError(source, message); })); } catch { }
+                return;
+            }
+
+            for (int i = _errors.Count - 1; i >= 0 && i >= _errors.Count - 8; i -= 1)
+            {
+                ShellError old = _errors[i];
+                if (old.Source == source && old.Message == message && (DateTime.Now - old.At).TotalSeconds < 30) return;
+            }
+
+            _errors.Add(new ShellError { At = DateTime.Now, Source = source, Message = message });
+            while (_errors.Count > 200) _errors.RemoveAt(0);
+            RefreshErrorBadge();
+        }
+
+        private void RefreshErrorBadge()
+        {
+            int count = _errors.Count;
+            _errorBadge.Text = count > 99 ? "99+" : count.ToString();
+            _errorBadge.Visible = count > 0;
+            _errorBadge.Size = new Size(count > 9 ? 24 : 18, 15);
+
+            // 平时灰、有错变红
+            _errorButton.BackColor = count > 0 ? Color.FromArgb(150, 40, 40) : Color.FromArgb(46, 54, 66);
+            _errorText.ForeColor = count > 0 ? Color.White : Color.FromArgb(150, 158, 170);
+            _errorText.Text = count > 0 ? "报错" : "报错";
+        }
+
+        private void ShowErrorDialog()
+        {
+            Form dlg = new Form();
+            dlg.Text = "错误与告警 · " + _errors.Count + " 条";
+            dlg.Size = new Size(780, 480);
+            dlg.StartPosition = FormStartPosition.CenterParent;
+            dlg.BackColor = Color.FromArgb(24, 30, 40);
+            dlg.Font = new Font("Microsoft YaHei UI", 9F);
+
+            TextBox box = new TextBox();
+            box.Multiline = true;
+            box.ReadOnly = true;
+            box.ScrollBars = ScrollBars.Both;
+            box.WordWrap = false;
+            box.Dock = DockStyle.Fill;
+            box.BackColor = Color.FromArgb(18, 24, 32);
+            box.ForeColor = Color.FromArgb(208, 218, 230);
+            box.BorderStyle = BorderStyle.None;
+            box.Font = new Font("Consolas", 9F);
+
+            if (_errors.Count == 0)
+            {
+                box.Text =
+                    "暂无错误。\r\n\r\n" +
+                    "这里会记录：\r\n" +
+                    "  · 服务启动失败 / 健康检查连续失败\r\n" +
+                    "  · 页面嵌入失败、Edge 找不到\r\n" +
+                    "  · 主界面卡顿（超过 20 秒无响应）\r\n" +
+                    "  · 未捕获的异常（来源会注明）\r\n";
+            }
+            else
+            {
+                StringBuilder sb = new StringBuilder();
+                for (int i = _errors.Count - 1; i >= 0; i -= 1)
+                {
+                    ShellError item = _errors[i];
+                    sb.AppendLine(item.At.ToString("MM-dd HH:mm:ss") + "   [" + item.Source + "]");
+                    sb.AppendLine("    " + item.Message);
+                    sb.AppendLine();
+                }
+                box.Text = sb.ToString();
+            }
+            dlg.Controls.Add(box);
+
+            Panel bar = new Panel();
+            bar.Dock = DockStyle.Bottom;
+            bar.Height = 46;
+            bar.BackColor = Color.FromArgb(28, 36, 48);
+            dlg.Controls.Add(bar);
+
+            Button clear = new Button();
+            clear.Text = "清空";
+            clear.Size = new Size(80, 28);
+            clear.Location = new Point(14, 9);
+            clear.FlatStyle = FlatStyle.Flat;
+            clear.FlatAppearance.BorderSize = 0;
+            clear.BackColor = Color.FromArgb(46, 54, 66);
+            clear.ForeColor = Color.FromArgb(206, 218, 232);
+            clear.Click += delegate
+            {
+                _errors.Clear();
+                RefreshErrorBadge();
+                dlg.Close();
+            };
+            bar.Controls.Add(clear);
+
+            Button copy = new Button();
+            copy.Text = "复制全部";
+            copy.Size = new Size(92, 28);
+            copy.Location = new Point(102, 9);
+            copy.FlatStyle = FlatStyle.Flat;
+            copy.FlatAppearance.BorderSize = 0;
+            copy.BackColor = Color.FromArgb(46, 54, 66);
+            copy.ForeColor = Color.FromArgb(206, 218, 232);
+            copy.Click += delegate
+            {
+                try { Clipboard.SetText(box.Text); } catch { }
+            };
+            bar.Controls.Add(copy);
+
+            Button close = new Button();
+            close.Text = "关闭";
+            close.Size = new Size(80, 28);
+            close.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            close.Location = new Point(bar.ClientSize.Width - 94, 9);
+            close.FlatStyle = FlatStyle.Flat;
+            close.FlatAppearance.BorderSize = 0;
+            close.BackColor = Color.FromArgb(46, 54, 66);
+            close.ForeColor = Color.FromArgb(206, 218, 232);
+            close.Click += delegate { dlg.Close(); };
+            bar.Controls.Add(close);
+
+            dlg.ShowDialog(this);
+        }
+
+        // ================================================================ 健康自检 / 防卡死
+
+        private void StartHealthWatch()
+        {
+            _lastHealthTick = DateTime.Now;
+            _healthTimer = new System.Windows.Forms.Timer();
+            _healthTimer.Interval = 8000;
+            _healthTimer.Tick += delegate { CheckHealth(); };
+            _healthTimer.Start();
+
+            // 首轮延后一点，避免和服务启动抢时间
+            System.Windows.Forms.Timer kick = new System.Windows.Forms.Timer();
+            kick.Interval = 4000;
+            kick.Tick += delegate
+            {
+                kick.Stop();
+                kick.Dispose();
+                CheckHealth();
+            };
+            kick.Start();
+        }
+
+        private void CheckHealth()
+        {
+            DateTime now = DateTime.Now;
+
+            // 防卡死：定时器本应每 8 秒触发；间隔明显超出说明 UI 线程被阻塞过
+            double gap = (now - _lastHealthTick).TotalSeconds;
+            _lastHealthTick = now;
+            if (gap > 20)
+            {
+                AddError("界面", "主线程阻塞约 " + Math.Round(gap) + " 秒，现已恢复（可能是页面渲染或大量文件操作）");
+            }
+
+            int down = 0;
+            if (!ProbeHealth(_port, "/api/health")) down += 1;
+            if (!ProbeHealth(_pulse, "/api/health")) down += 1;
+            if (!ProbeHealth(_tuner, "/api/health")) down += 1;
+
+            if (down > 0)
+            {
+                _healthFailStreak += 1;
+                if (_healthFailStreak == 3)
+                {
+                    AddError("服务", down + " 个服务连续 3 次探测无响应，可在「设置」中重启服务");
+                }
+            }
+            else
+            {
+                if (_healthFailStreak >= 3) AddError("服务", "服务已恢复响应");
+                _healthFailStreak = 0;
+            }
+
+            UpdateStatusText(down);
+        }
+
+        private bool ProbeHealth(int port, string path)
+        {
+            try
+            {
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + path);
+                request.Timeout = 2000;
+                request.ReadWriteTimeout = 2000;
+                request.Proxy = null;
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                {
+                    return response.StatusCode == HttpStatusCode.OK;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void UpdateStatusText(int down)
+        {
+            if (_statusLabel == null) return;
+            if (down == _lastDownCount) return;
+            _lastDownCount = down;
+
+            if (down == 0)
+            {
+                _statusLabel.Text = string.Format(
+                    "索引库 {0} · 看板 {1} · 降温 {2}　全部在线", _port, _pulse, _tuner);
+                _statusLabel.ForeColor = Color.FromArgb(132, 176, 148);
+            }
+            else
+            {
+                _statusLabel.Text = string.Format(
+                    "{0} 个服务无响应（{1} / {2} / {3}）", down, _port, _pulse, _tuner);
+                _statusLabel.ForeColor = Color.FromArgb(214, 148, 120);
+            }
+        }
+
+        // ================================================================ 设置
+
+        private void ShowSettings()
+        {
+            Form dlg = new Form();
+            dlg.Text = "设置 · CodeBuddy 工作套件";
+            dlg.Size = new Size(660, 640);
+            dlg.StartPosition = FormStartPosition.CenterParent;
+            dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+            dlg.MaximizeBox = false;
+            dlg.MinimizeBox = false;
+            dlg.BackColor = Color.FromArgb(24, 30, 40);
+            dlg.ForeColor = Color.FromArgb(210, 222, 234);
+            dlg.Font = new Font("Microsoft YaHei UI", 9F);
+
+            Label head = new Label();
+            head.Text = "服务端口";
+            head.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+            head.ForeColor = Color.FromArgb(140, 190, 230);
+            head.Bounds = new Rectangle(24, 18, 300, 24);
+            dlg.Controls.Add(head);
+
+            Label hint = new Label();
+            hint.Text = "改完保存会自动重启三个服务；端口被占用时会提示换一个。";
+            hint.ForeColor = Color.FromArgb(130, 144, 162);
+            hint.Bounds = new Rectangle(24, 44, 600, 20);
+            dlg.Controls.Add(hint);
+
+            NumericUpDown cv = MakePortBox(dlg, 24, 74, "索引库", _port);
+            NumericUpDown pu = MakePortBox(dlg, 24, 112, "看板", _pulse);
+            NumericUpDown tu = MakePortBox(dlg, 24, 150, "降温", _tuner);
+
+            Label hostLabel = new Label();
+            hostLabel.Text = "监听地址";
+            hostLabel.Bounds = new Rectangle(24, 192, 80, 22);
+            dlg.Controls.Add(hostLabel);
+
+            ComboBox hostBox = new ComboBox();
+            hostBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            hostBox.Bounds = new Rectangle(112, 190, 300, 24);
+            hostBox.Items.Add("127.0.0.1（仅本机）");
+            hostBox.Items.Add("0.0.0.0（局域网可访问）");
+            hostBox.SelectedIndex = (ReadHostFromConfig() == "0.0.0.0") ? 1 : 0;
+            dlg.Controls.Add(hostBox);
+
+            // ---- 可外接内容（只读展示，告诉用户都能接什么）
+            Label extHead = new Label();
+            extHead.Text = "可外接内容";
+            extHead.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+            extHead.ForeColor = Color.FromArgb(140, 190, 230);
+            extHead.Bounds = new Rectangle(24, 230, 300, 24);
+            dlg.Controls.Add(extHead);
+
+            TextBox ext = new TextBox();
+            ext.Multiline = true;
+            ext.ReadOnly = true;
+            ext.ScrollBars = ScrollBars.Vertical;
+            ext.BorderStyle = BorderStyle.None;
+            ext.BackColor = Color.FromArgb(18, 24, 32);
+            ext.ForeColor = Color.FromArgb(196, 208, 222);
+            ext.Font = new Font("Consolas", 8.5F);
+            ext.Bounds = new Rectangle(24, 258, 596, 190);
+            ext.Text = BuildExternalEndpointsText();
+            dlg.Controls.Add(ext);
+
+            // ---- 环境检测输出
+            Label hcHead = new Label();
+            hcHead.Text = "环境检测";
+            hcHead.Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
+            hcHead.ForeColor = Color.FromArgb(140, 190, 230);
+            hcHead.Bounds = new Rectangle(24, 458, 200, 24);
+            dlg.Controls.Add(hcHead);
+
+            TextBox hcOut = new TextBox();
+            hcOut.Multiline = true;
+            hcOut.ReadOnly = true;
+            hcOut.ScrollBars = ScrollBars.Vertical;
+            hcOut.BorderStyle = BorderStyle.None;
+            hcOut.BackColor = Color.FromArgb(18, 24, 32);
+            hcOut.ForeColor = Color.FromArgb(170, 184, 200);
+            hcOut.Font = new Font("Consolas", 8.5F);
+            hcOut.Bounds = new Rectangle(24, 484, 596, 66);
+            hcOut.Text = "点击右侧「运行检测」检查文件与功能完整性。";
+            dlg.Controls.Add(hcOut);
+
+            Button runCheck = new Button();
+            runCheck.Text = "运行检测";
+            runCheck.Size = new Size(96, 26);
+            runCheck.Location = new Point(424, 456);
+            runCheck.FlatStyle = FlatStyle.Flat;
+            runCheck.FlatAppearance.BorderSize = 0;
+            runCheck.BackColor = Color.FromArgb(46, 64, 86);
+            runCheck.ForeColor = Color.FromArgb(210, 222, 234);
+            runCheck.Click += delegate
+            {
+                hcOut.Text = "正在检测…";
+                runCheck.Enabled = false;
+                try
+                {
+                    hcOut.Text = RunHealthCheck();
+                }
+                catch (Exception ex)
+                {
+                    hcOut.Text = "检测失败：" + ex.Message;
+                    AddError("环境检测", ex.Message);
+                }
+                runCheck.Enabled = true;
+            };
+            dlg.Controls.Add(runCheck);
+
+            Button openFolder = new Button();
+            openFolder.Text = "打开目录";
+            openFolder.Size = new Size(88, 26);
+            openFolder.Location = new Point(528, 456);
+            openFolder.FlatStyle = FlatStyle.Flat;
+            openFolder.FlatAppearance.BorderSize = 0;
+            openFolder.BackColor = Color.FromArgb(46, 54, 66);
+            openFolder.ForeColor = Color.FromArgb(210, 222, 234);
+            openFolder.Click += delegate { try { Process.Start("explorer.exe", _kitRoot); } catch { } };
+            dlg.Controls.Add(openFolder);
+
+            // ---- 底部按钮
+            Button save = new Button();
+            save.Text = "保存并重启";
+            save.Size = new Size(112, 30);
+            save.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            save.Location = new Point(dlg.ClientSize.Width - 250, dlg.ClientSize.Height - 48);
+            save.FlatStyle = FlatStyle.Flat;
+            save.FlatAppearance.BorderSize = 0;
+            save.BackColor = Color.FromArgb(40, 92, 140);
+            save.ForeColor = Color.White;
+            save.Click += delegate
+            {
+                string error;
+                if (!SaveConfig((int)cv.Value, (int)pu.Value, (int)tu.Value,
+                        hostBox.SelectedIndex == 1 ? "0.0.0.0" : "127.0.0.1", out error))
+                {
+                    MessageBox.Show(this, "保存失败：" + error, "设置", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    AddError("设置", "保存配置失败：" + error);
+                    return;
+                }
+                dlg.Close();
+                RestartServices();
+            };
+            dlg.Controls.Add(save);
+
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Size = new Size(88, 30);
+            cancel.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            cancel.Location = new Point(dlg.ClientSize.Width - 128, dlg.ClientSize.Height - 48);
+            cancel.FlatStyle = FlatStyle.Flat;
+            cancel.FlatAppearance.BorderSize = 0;
+            cancel.BackColor = Color.FromArgb(46, 54, 66);
+            cancel.ForeColor = Color.FromArgb(210, 222, 234);
+            cancel.Click += delegate { dlg.Close(); };
+            dlg.Controls.Add(cancel);
+
+            dlg.ShowDialog(this);
+        }
+
+        private NumericUpDown MakePortBox(Form dlg, int x, int y, string label, int value)
+        {
+            Label tag = new Label();
+            tag.Text = label;
+            tag.Bounds = new Rectangle(x, y + 3, 80, 22);
+            dlg.Controls.Add(tag);
+
+            NumericUpDown box = new NumericUpDown();
+            box.Minimum = 1024;
+            box.Maximum = 65535;
+            box.Value = value;
+            box.Bounds = new Rectangle(x + 88, y, 120, 24);
+            dlg.Controls.Add(box);
+            return box;
+        }
+
+        private string ReadHostFromConfig()
+        {
+            try
+            {
+                string path = Path.Combine(_kitRoot, "config", "deploy.json");
+                if (!File.Exists(path)) return "127.0.0.1";
+                string raw = File.ReadAllText(path, Encoding.UTF8).TrimStart('\uFEFF');
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                Dictionary<string, object> map = ser.Deserialize<Dictionary<string, object>>(raw);
+                object host;
+                if (map != null && map.TryGetValue("host", out host) && host != null)
+                {
+                    return Convert.ToString(host);
+                }
+            }
+            catch
+            {
+                /* fall through */
+            }
+            return "127.0.0.1";
+        }
+
+        private string BuildExternalEndpointsText()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("浏览器 / 其他设备可访问的地址：");
+            sb.AppendLine("  索引库页面    http://127.0.0.1:" + _port + "/");
+            sb.AppendLine("  索引库接口    http://127.0.0.1:" + _port + "/api/repos");
+            sb.AppendLine("              http://127.0.0.1:" + _port + "/api/scripts");
+            sb.AppendLine("  看板页面    http://127.0.0.1:" + _pulse + "/");
+            sb.AppendLine("  看板接口    http://127.0.0.1:" + _pulse + "/api/health");
+            sb.AppendLine("              http://127.0.0.1:" + _pulse + "/api/guard");
+            sb.AppendLine("  降温页面    http://127.0.0.1:" + _tuner + "/");
+            sb.AppendLine("  降温接口    http://127.0.0.1:" + _tuner + "/api/health");
+            sb.AppendLine("");
+            sb.AppendLine("接入方式：把上面的监听地址改成 0.0.0.0 后，同一局域网内用本机 IP 访问。");
+            sb.AppendLine("数据接入：把项目目录登记进仓库清单即可出现在索引库：");
+            sb.AppendLine("  node apps\\scriptvault\\tools\\adopt-project.mjs \"<项目目录>\" --name <简称>");
+            sb.AppendLine("进度接入：用 pulse 包装命令即可上报：");
+            sb.AppendLine("  node apps\\pulse\\cli\\pulse.js run -- <命令>");
+            sb.AppendLine("");
+            sb.AppendLine("规则分发：安装时写入 " + _kitRoot + "\\AGENTS.md 及 CodeBuddy / Cursor /");
+            sb.AppendLine("Claude / Codex / Cline / Windsurf 的约定位置，可重复执行 install-rules.ps1。");
+            return sb.ToString();
+        }
+
+        private string RunHealthCheck()
+        {
+            string script = Path.Combine(_kitRoot, "tools", "health-check.ps1");
+            if (!File.Exists(script)) return "未找到 tools\\health-check.ps1";
+
+            ProcessStartInfo psi = new ProcessStartInfo(
+                "powershell.exe",
+                "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" -Target \"" + _kitRoot + "\"");
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = Encoding.UTF8;
+            psi.StandardErrorEncoding = Encoding.UTF8;
+
+            try
+            {
+                using (Process p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(30000);
+                    return string.IsNullOrEmpty(output) ? "（无输出）" : output;
+                }
+            }
+            catch (Exception ex)
+            {
+                return "执行失败：" + ex.Message;
+            }
+        }
+
+        private bool SaveConfig(int codevault, int pulse, int tuner, string host, out string error)
+        {
+            error = "";
+            try
+            {
+                string path = Path.Combine(_kitRoot, "config", "deploy.json");
+                string raw = File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8).TrimStart('\uFEFF') : "{}";
+
+                JavaScriptSerializer ser = new JavaScriptSerializer();
+                Dictionary<string, object> map = ser.Deserialize<Dictionary<string, object>>(raw);
+                if (map == null) map = new Dictionary<string, object>();
+
+                map["host"] = host;
+                map["lan"] = host == "0.0.0.0";
+
+                object existingPorts;
+                Dictionary<string, object> ports;
+                if (map.TryGetValue("ports", out existingPorts) && existingPorts is Dictionary<string, object>)
+                {
+                    ports = (Dictionary<string, object>)existingPorts;
+                }
+                else
+                {
+                    ports = new Dictionary<string, object>();
+                    map["ports"] = ports;
+                }
+                ports["codevault"] = codevault;
+                ports["pulse"] = pulse;
+                ports["tuner"] = tuner;
+
+                // 无 BOM 写入：Node 的 JSON.parse 不接受 BOM
+                File.WriteAllText(path, ser.Serialize(map), new UTF8Encoding(false));
+
+                _port = codevault;
+                _pulse = pulse;
+                _tuner = tuner;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private void RestartServices()
+        {
+            try
+            {
+                AddError("设置", "正在按新端口重启服务…");
+                RunNodeTool("stop.mjs", "all");
+                Thread.Sleep(800);
+                RunNodeTool("launch.mjs", "all");
+                _healthFailStreak = 0;
+                _lastDownCount = -1;
+                CheckHealth();
+            }
+            catch (Exception ex)
+            {
+                AddError("重启", ex.Message);
+            }
+        }
+
+        private void RunNodeTool(string script, string args)
+        {
+            string node = Path.Combine(_kitRoot, "runtime", "node.exe");
+            if (!File.Exists(node)) node = "node";
+
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = node;
+            psi.Arguments = "\"" + Path.Combine(_kitRoot, "tools", script) + "\" " + args;
+            psi.WorkingDirectory = _kitRoot;
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+
+            using (Process p = Process.Start(psi))
+            {
+                p.WaitForExit(25000);
+            }
+        }
+
+        /// <summary>profile 复用，退出时不删（保留缓存，下次启动更快）。</summary>
+        private void CleanupProfile()
+        {
+            // 固定 profile 刻意保留：删掉会导致每次冷启动都要重建上百 MB 缓存，
+            // 既慢又让首页首次渲染出现空白。
+        }
+
+        /// <summary>
+        /// 结束占用本 profile 的残留 Edge 进程。
+        /// 上次异常退出留下的窗口会让 `--app` 请求转发过去，结果嵌错窗口。
+        /// </summary>
+        private static void KillStaleEdge(string profile)
+        {
+            try
+            {
+                string command =
+                    "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | " +
+                    "Where-Object { $_.CommandLine -like '*" + profile.Replace("'", "''") + "*' } | " +
+                    "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }";
+
+                ProcessStartInfo psi = new ProcessStartInfo("powershell.exe",
+                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" + command + "\"");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                using (Process p = Process.Start(psi))
+                {
+                    p.WaitForExit(6000);
+                }
+                Thread.Sleep(400);
+            }
+            catch
+            {
+                /* best effort: a stale window only costs an extra match, not a crash */
+            }
+        }
+
         private void LayoutEmbedded()
         {
             if (!_embedded || _pageHwnd == IntPtr.Zero) return;
+
+            // Leave room for the top bar. The embedded Edge window is another
+            // process's HWND, so it always paints above our own controls — a button
+            // placed inside its rectangle would be invisible. Keeping the top
+            // strip free is what makes the buttons usable at all.
+            int top = TOP_BAR_HEIGHT;
+            int w = Math.Max(1, ClientSize.Width);
+            int h = Math.Max(1, ClientSize.Height - top);
+
             // MoveWindow alone leaves the child with its old frame metrics, so the
             // page never quite fills the client area. SWP_FRAMECHANGED forces the
             // child to recompute its non-client area after the style change.
@@ -993,17 +1786,30 @@ namespace CodeBuddyWorkKit
                 _pageHwnd,
                 IntPtr.Zero,
                 0,
-                0,
-                ClientSize.Width,
-                ClientSize.Height,
+                top,
+                w,
+                h,
                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
             // Belt and braces: the client area of the child must equal what we asked.
-            MoveWindow(_pageHwnd, 0, 0, ClientSize.Width, ClientSize.Height, true);
+            MoveWindow(_pageHwnd, 0, top, w, h, true);
+
+            // 移动跨进程窗口后它不会自己重画，强制一次，否则页面停在黑屏
+            try
+            {
+                InvalidateRect(_pageHwnd, IntPtr.Zero, true);
+                UpdateWindow(_pageHwnd);
+            }
+            catch
+            {
+                /* cosmetic */
+            }
+
+            if (_topBar != null) _topBar.BringToFront();
         }
 
         /// <summary>Diagnostics: a silent restore failure is impossible to debug otherwise.</summary>
-        private static void Log(string message)
+        internal static void Log(string message)
         {
             try
             {

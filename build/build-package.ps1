@@ -219,6 +219,22 @@ if (Test-Path $shellExe) {
   throw '桌面壳编译失败，打包中止。'
 }
 
+# 原生窗口：纯 WinForms，不依赖浏览器
+$nativeDir = Join-Path $Payload 'native'
+$nativeExe = Join-Path $nativeDir 'CodeBuddyWorkKit.Native.exe'
+if (Test-Path $nativeExe) { Remove-Item $nativeExe -Force }
+& $csc /nologo /target:winexe /out:$nativeExe @refs `
+  (Join-Path $nativeDir 'Theme.cs') `
+  (Join-Path $nativeDir 'Api.cs') `
+  (Join-Path $nativeDir 'NativeForm.cs') `
+  (Join-Path $nativeDir 'Program.cs') 2>&1 |
+  ForEach-Object { Say ("  " + $_) 'Red' }
+if (Test-Path $nativeExe) {
+  Say ("  [ok]   CodeBuddyWorkKit.Native.exe  {0:N0} KB" -f ((Get-Item $nativeExe).Length / 1KB)) 'Green'
+} else {
+  throw '原生窗口编译失败，打包中止。'
+}
+
 # ------------------------------------------------------------------ 5. 打包
 Say ''
 Say '  [5/5] 生成压缩包' 'Cyan'

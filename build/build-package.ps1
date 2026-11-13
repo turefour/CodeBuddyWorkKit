@@ -175,6 +175,14 @@ Say ("  [ok]   {0} 个脚本已带 BOM" -f $converted) 'Green'
 # ------------------------------------------------------------------ 4. 编译安装器与桌面壳
 Say ''
 Say '  [4/5] 编译安装器与桌面壳' 'Cyan'
+
+# 测试桌面壳时它会在 payload\shell\state 下落一个 Edge profile（近 80MB），
+# 这属于运行时数据，绝不能进分发包。
+$shellState = Join-Path $Payload 'shell\state'
+if (Test-Path $shellState) {
+  Remove-Item $shellState -Recurse -Force
+  Say '  [clean] 移除 payload\shell\state（运行时残留）' 'DarkYellow'
+}
 $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $refs = @('/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll')
 

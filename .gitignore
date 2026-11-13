@@ -1,0 +1,25 @@
+# 构建产物：由 build/build-package.ps1 每次重新生成，不入库
+payload/apps/
+payload/runtime/
+payload/shell/*.exe
+payload/native/*.exe
+installer.exe
+*.zip
+
+# 运行时状态与日志
+state/
+*.log
+*.pid
+
+# 系统杂物
+Thumbs.db
+.DS_Store
+~$*
+# added by adopt-project（注意：不能用 build/ 规则，build/ 目录里放的是构建脚本本身）
+node_modules/
+dist/
+coverage/
+.cache/
+.env
+.env.*
+*.tsbuildinfo

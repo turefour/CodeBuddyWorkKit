@@ -278,27 +278,56 @@ namespace CodeBuddyWorkKit
         private readonly Button _btnInstall;
         private readonly Button _btnClose;
         private readonly Label _status;
+        private Label _installBadge;
         private bool _envPassed;
         private bool _busy;
 
         // Filled by check-install.ps1: "not-installed" | "same" | "upgrade" | "downgrade"
         private string _installState = "not-installed";
         private string _installedVersion = "";
+        private string _installedAt = "";
+        private string _installedPath = "";
+
+        /** "2026-11-13T13:45:56+08:00" -> "2026-11-13 13:45"; never throws. */
+        private static string FormatDeployedAt(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "未知";
+            DateTime parsed;
+            return DateTime.TryParse(raw, out parsed) ? parsed.ToString("yyyy-MM-dd HH:mm") : raw;
+        }
 
         /** One-line summary of what this run will do, shown next to the buttons. */
         private string InstallStateText()
         {
+            string installedPart = "v" + _installedVersion +
+                (_installedAt.Length > 0 ? "（" + FormatDeployedAt(_installedAt) + " 部署）" : "");
+
             switch (_installState)
             {
                 case "same":
-                    return "已装 v" + _installedVersion + "（本包 v" + Program.PackageVersion + "，将重装）";
+                    return "已装 " + installedPart + "，与本包同版本（将重装）";
                 case "upgrade":
-                    return "升级 v" + _installedVersion + " → v" + Program.PackageVersion;
+                    return "升级 " + installedPart + " → v" + Program.PackageVersion;
                 case "downgrade":
-                    return "降级 v" + _installedVersion + " → v" + Program.PackageVersion;
+                    return "降级 " + installedPart + " → v" + Program.PackageVersion;
                 default:
                     return "首次安装 v" + Program.PackageVersion;
             }
+        }
+
+        /** Multi-line block for the confirmation dialog: version, date, location. */
+        private string InstallSummaryBlock()
+        {
+            if (_installState == "not-installed")
+            {
+                return "首次安装，未检测到已部署副本";
+            }
+            return string.Format(
+                "已装版本：v{0}\n更新时间：{1}\n安装位置：{2}\n本次方式：{3}",
+                _installedVersion,
+                FormatDeployedAt(_installedAt),
+                _installedPath,
+                InstallStateText());
         }
 
         internal InstallerForm()
@@ -345,6 +374,16 @@ namespace CodeBuddyWorkKit
             optTitle.AutoSize = true;
             optTitle.Location = new Point(22, 304);
             Controls.Add(optTitle);
+
+            // 常驻一行：已装版本 + 更新日期 + 本次动作。
+            // 放在日志里会被后续输出滚走，所以单独占一条固定位置。
+            _installBadge = new Label();
+            _installBadge.AutoSize = false;
+            _installBadge.Bounds = new Rectangle(112, 302, 686, 22);
+            _installBadge.Font = new Font("Microsoft YaHei UI", 9F);
+            _installBadge.ForeColor = Color.FromArgb(120, 130, 145);
+            _installBadge.Text = "尚未检测";
+            Controls.Add(_installBadge);
 
             Label tLabel = new Label();
             tLabel.Text = "安装目录";
@@ -549,10 +588,18 @@ namespace CodeBuddyWorkKit
             ThreadPool.QueueUserWorkItem(delegate
             {
                 // (1) Already installed? which version? upgrade or reinstall?
-                PsResult install = Ps.Run("check-install.ps1", "-Target \"" + Program.TargetDir + "\"", AppendLog, false);
+                // -Json is required: without it the script prints prose only and
+                // LastJson() finds nothing, silently falling back to "not installed".
+                PsResult install = Ps.Run(
+                    "check-install.ps1",
+                    "-Target \"" + Program.TargetDir + "\" -Json",
+                    AppendLog,
+                    false);
                 Dictionary<string, object> info = Ps.LastJson(install.StdOut);
                 string state = "not-installed";
                 string installedVersion = "";
+                string installedAt = "";
+                string installedPath = "";
                 if (info != null)
                 {
                     if (info.ContainsKey("state")) state = Convert.ToString(info["state"]);
@@ -560,7 +607,12 @@ namespace CodeBuddyWorkKit
                     if (info.TryGetValue("installed", out rawInstalled))
                     {
                         Dictionary<string, object> map = rawInstalled as Dictionary<string, object>;
-                        if (map != null && map.ContainsKey("version")) installedVersion = Convert.ToString(map["version"]);
+                        if (map != null)
+                        {
+                            if (map.ContainsKey("version")) installedVersion = Convert.ToString(map["version"]);
+                            if (map.ContainsKey("deployedAt")) installedAt = Convert.ToString(map["deployedAt"]);
+                            if (map.ContainsKey("path")) installedPath = Convert.ToString(map["path"]);
+                        }
                     }
                 }
 
@@ -573,6 +625,8 @@ namespace CodeBuddyWorkKit
                 {
                     _installState = state;
                     _installedVersion = installedVersion;
+                    _installedAt = installedAt;
+                    _installedPath = installedPath;
 
                     bool ok = r.ExitCode == 0;
                     int blocks = 0;
@@ -583,6 +637,15 @@ namespace CodeBuddyWorkKit
                         warns = ToInt(json, "warns");
                     }
                     _envPassed = ok;
+
+                    // 状态条：已装版本 + 部署日期 + 本次动作
+                    _installBadge.Text = InstallStateText();
+                    _installBadge.ForeColor =
+                        _installState == "downgrade" ? Color.FromArgb(200, 60, 60) :
+                        _installState == "same" ? Color.FromArgb(176, 132, 24) :
+                        _installState == "upgrade" ? Color.FromArgb(24, 120, 72) :
+                        Color.FromArgb(24, 110, 90);
+
                     SetBusy(false, ok
                         ? string.Format("{0}｜环境检测通过（{1} 项提示）", InstallStateText(), warns)
                         : string.Format("环境检测未通过：{0} 项阻塞", blocks));
@@ -620,8 +683,8 @@ namespace CodeBuddyWorkKit
             SyncOptions();
 
             string message = string.Format(
-                "即将安装到：\n{0}\n\n方式：{1}\n索引库端口 {2}　看板 {3}　降温 {4}\n{5}\n\n确认开始安装？",
-                Program.TargetDir, InstallStateText(),
+                "即将安装到：\n{0}\n\n{1}\n\n索引库端口 {2}　看板 {3}　降温 {4}\n{5}\n\n确认开始安装？",
+                Program.TargetDir, InstallSummaryBlock(),
                 Program.PortCodevault, Program.PortPulse, Program.PortTuner,
                 Program.AllowLan ? "监听 0.0.0.0（局域网可访问）" : "仅本机访问");
             if (MessageBox.Show(this, message, "确认安装", MessageBoxButtons.OKCancel, MessageBoxIcon.Question)

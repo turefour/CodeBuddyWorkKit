@@ -116,22 +116,33 @@ $state = 'not-installed'
 $detail = '未检测到已安装的副本'
 
 if ($primary) {
+  # 安装时间要一起报出来：用户判断「该不该升级」看的往往是它离现在多久
+  $deployedRaw = if ($primary.deployedAt) { [string]$primary.deployedAt } else { '' }
+  $deployedText = '时间未知'
+  if ($deployedRaw) {
+    try {
+      $deployedText = ([datetime]$deployedRaw).ToString('yyyy-MM-dd HH:mm')
+    } catch {
+      $deployedText = $deployedRaw
+    }
+  }
+
   try {
     $pv = [version]$packageVersion
     $iv = [version]$primary.version
     if ($iv -eq $pv) {
       $state = 'same'
-      $detail = ("已安装相同的版本 {0}（{1}）" -f $primary.version, $primary.path)
+      $detail = ("已安装 {0}，部署于 {1}（{2}）—— 与本包同版本" -f $primary.version, $deployedText, $primary.path)
     } elseif ($iv -lt $pv) {
       $state = 'upgrade'
-      $detail = ("已安装 {0}，本包 {1}，可以升级（{2}）" -f $primary.version, $packageVersion, $primary.path)
+      $detail = ("已安装 {0}，部署于 {1}（{2}）；本包 {3}，可升级" -f $primary.version, $deployedText, $primary.path, $packageVersion)
     } else {
       $state = 'downgrade'
-      $detail = ("已安装 {0}，高于本包 {1}，属于降级（{2}）" -f $primary.version, $packageVersion, $primary.path)
+      $detail = ("已安装 {0}，部署于 {1}（{2}）；高于本包 {3}，属于降级" -f $primary.version, $deployedText, $primary.path, $packageVersion)
     }
   } catch {
     $state = 'same'
-    $detail = ("已安装副本版本无法比较（{0} vs {1}）" -f $primary.version, $packageVersion)
+    $detail = ("已安装副本版本无法比较（{0}，部署于 {1}）" -f $primary.version, $deployedText)
   }
 }
 
@@ -143,6 +154,8 @@ $exitCode = switch ($state) {
 }
 
 # ---------------------------------------------------------------- 输出
+# 可读摘要总是打印：安装器把这里当成日志显示，-Json 只是额外在末尾加一行
+# 机器可读的 JSON，两者共存，调用方不必跑两遍。
 if ($Json) {
   [pscustomobject]@{
     ok             = $true
@@ -175,10 +188,23 @@ if ($Json) {
   }
 
   $color = switch ($state) {
-    'not-installed' { 'Green' }
-    'same' { 'Yellow' }
-    'upgrade' { 'Green' }
-    'downgrade' { 'Red' }
+  'not-installed' { 'Green' }
+  'same' { 'Yellow' }
+  'upgrade' { 'Green' }
+  'downgrade' { 'Red' }
+  }
+
+  if ($primary) {
+    $shown = '未知'
+    if ($primary.deployedAt) {
+      try {
+        $shown = ([datetime]$primary.deployedAt).ToString('yyyy-MM-dd HH:mm')
+      } catch {
+        $shown = [string]$primary.deployedAt
+      }
+    }
+    Write-Host ("  已装版本 : {0}" -f $primary.version) -ForegroundColor White
+    Write-Host ("  更新日期 : {0}" -f $shown) -ForegroundColor White
   }
   Write-Host ''
   Write-Host ("  结论     : {0}" -f $detail) -ForegroundColor $color

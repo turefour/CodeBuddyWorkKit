@@ -6,6 +6,7 @@ using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -781,6 +782,9 @@ namespace WorkKit.Native
 
         // ---------------------------------------------------------- 刷新
 
+        /// <summary>上一轮刷新还没跑完时不再起新一轮，否则会叠加重入、越来越慢。</summary>
+        private bool _refreshing;
+
         private void Tick()
         {
             DateTime now = DateTime.Now;
@@ -790,14 +794,46 @@ namespace WorkKit.Native
             {
                 AddError("界面", "主线程阻塞约 " + Math.Round(gap) + " 秒，现已恢复");
             }
-            RefreshAll();
+
+            // 防重入：上一轮如果因为服务不通卡住，这里直接跳过，
+            // 不让定时器把任务堆起来（堆起来就是「越用越卡」）。
+            if (_refreshing) return;
+            _refreshing = true;
+            try
+            {
+                RefreshAll();
+            }
+            finally
+            {
+                _refreshing = false;
+            }
         }
 
+        /// <summary>
+        /// 探测 + 刷新。
+        ///
+        /// 关键改动：三个健康探测改成**并行**。之前是串行，每个超时 1600ms，
+        /// 服务全挂时一轮就要 4.8 秒 —— UI 线程被完全阻塞，表现就是「严重卡顿」
+        /// 和「托盘右键菜单点不开」。并行后最坏只花 1 个超时的时间。
+        /// </summary>
         private void RefreshAll()
         {
-            bool okCv = Api.GetOk("http://127.0.0.1:" + _port + "/api/health", 1600);
-            bool okPulse = Api.GetOk("http://127.0.0.1:" + _pulse + "/api/health", 1600);
-            bool okTuner = Api.GetOk("http://127.0.0.1:" + _tuner + "/api/health", 1600);
+            const int probeTimeout = 700;
+
+            Task<bool> probeCv = Task.Factory.StartNew(
+                delegate { return Api.GetOk("http://127.0.0.1:" + _port + "/api/health", probeTimeout); });
+            Task<bool> probePulse = Task.Factory.StartNew(
+                delegate { return Api.GetOk("http://127.0.0.1:" + _pulse + "/api/health", probeTimeout); });
+            Task<bool> probeTuner = Task.Factory.StartNew(
+                delegate { return Api.GetOk("http://127.0.0.1:" + _tuner + "/api/health", probeTimeout); });
+
+            Task[] probes = new Task[] { probeCv, probePulse, probeTuner };
+            // 再兜一层总超时，防止某个探测因为 DNS/防火墙卡得比 request.Timeout 更久
+            Task.WaitAll(probes, probeTimeout + 300);
+
+            bool okCv = probeCv.Status == TaskStatus.RanToCompletion && probeCv.Result;
+            bool okPulse = probePulse.Status == TaskStatus.RanToCompletion && probePulse.Result;
+            bool okTuner = probeTuner.Status == TaskStatus.RanToCompletion && probeTuner.Result;
 
             int up = (okCv ? 1 : 0) + (okPulse ? 1 : 0) + (okTuner ? 1 : 0);
             if (up < 3)
@@ -816,19 +852,32 @@ namespace WorkKit.Native
             _upCount = up;
             SetStatus(up);
 
-            // 仓库先刷：概览的「仓库」指标直接复用它的结果，避免再打一次慢接口
-            RefreshRepos();
-            RefreshPulse();
-            RefreshOverview(okCv);
-            RefreshProjects();
-            RefreshScripts();
-
-            if (_footRight != null)
+            // 全部不通时直接返回：再往下每一个刷新都是一次超时，叠起来就是几秒白屏
+            if (up == 0)
             {
-                _footRight.Text = string.Format(
-                    "端口 {0} / {1} / {2} · 事件 {3} · ~{4} token · {5}",
-                    _port, _pulse, _tuner, _usageEvents, _estTokens, DateTime.Now.ToString("HH:mm:ss"));
+                UpdateFootRight();
+                return;
             }
+
+            // 只刷新「服务在线」的那些视图，离线的跳过 —— 否则又是几次超时
+            if (okCv)
+            {
+                RefreshRepos();
+                RefreshOverview(okCv);
+                RefreshProjects();
+                RefreshScripts();
+            }
+            if (okPulse) RefreshPulse();
+
+            UpdateFootRight();
+        }
+
+        private void UpdateFootRight()
+        {
+            if (_footRight == null) return;
+            _footRight.Text = string.Format(
+                "端口 {0} / {1} / {2} · 事件 {3} · ~{4} token · {5}",
+                _port, _pulse, _tuner, _usageEvents, _estTokens, DateTime.Now.ToString("HH:mm:ss"));
         }
 
         private void SetStatus(int up)

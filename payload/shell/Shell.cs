@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // CodeBuddy 工作套件 - 桌面壳
 //
 // 把索引库从"浏览器里的一个标签页"变成"一个独立窗口"：
@@ -240,6 +240,7 @@ namespace CodeBuddyWorkKit
         private System.Windows.Forms.Timer _guardTimer;
         private readonly List<GuardAlert> _recentAlerts = new List<GuardAlert>();
         private string _lastAlertId = "";
+        private string _lastGuardSignature = "";
         private DateTime _lastNotifyAt = DateTime.MinValue;
         private bool _notifyMuted;
         private ToolStripMenuItem _guardMenu;
@@ -347,11 +348,36 @@ namespace CodeBuddyWorkKit
             CheckGuard();
         }
 
+        /// <summary>
+        /// 轮询 Pulse 的 /api/guard。
+        ///
+        /// HTTP 放到后台线程：之前是在 UI 线程里同步发请求（超时 2 秒），
+        /// 每 5 秒卡一次。用户正好在这个窗口里右键托盘，就会觉得「菜单加载很慢」
+        /// —— 其实不是菜单慢，是 UI 线程正卡在等 HTTP。
+        /// </summary>
         private void CheckGuard()
         {
-            List<GuardAlert> alerts;
-            bool anyLocked;
-            if (!TryReadGuard(out alerts, out anyLocked)) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<GuardAlert> alerts;
+                bool anyLocked;
+                if (!TryReadGuard(out alerts, out anyLocked)) return;
+
+                try
+                {
+                    BeginInvoke(new Action(delegate { ApplyGuard(alerts, anyLocked); }));
+                }
+                catch
+                {
+                    /* 窗口已销毁：忽略，下一轮也不会再来 */
+                }
+            });
+        }
+
+        /// <summary>把后台读到的告警应用到 UI（必须在 UI 线程执行）。</summary>
+        private void ApplyGuard(List<GuardAlert> alerts, bool anyLocked)
+        {
+            if (IsDisposed) return;
 
             // Tray glyph: red-ish warning while something is locked
             try
@@ -383,7 +409,26 @@ namespace CodeBuddyWorkKit
                 }
             }
 
-            RefreshGuardMenu();
+            // 内容没变就不重建菜单项：重建会清空再添加，
+            // 正好在展开状态下发生就会闪一下，也是「菜单卡」的来源之一。
+            string signature = GuardSignature();
+            if (signature != _lastGuardSignature)
+            {
+                _lastGuardSignature = signature;
+                RefreshGuardMenu();
+            }
+        }
+
+        /// <summary>告警列表的指纹，用于「没变化就不重绘」。</summary>
+        private string GuardSignature()
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append(_recentAlerts.Count);
+            for (int i = 0; i < _recentAlerts.Count; i += 1)
+            {
+                sb.Append('|').Append(_recentAlerts[i].Id);
+            }
+            return sb.ToString();
         }
 
         private bool TryReadGuard(out List<GuardAlert> alerts, out bool anyLocked)
@@ -393,7 +438,7 @@ namespace CodeBuddyWorkKit
             try
             {
                 HttpWebRequest request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + _pulse + "/api/guard");
-                request.Timeout = 2000;
+                request.Timeout = 1200;
                 request.Proxy = null;
                 using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
                 using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
@@ -634,6 +679,7 @@ namespace CodeBuddyWorkKit
                     clear.Click += delegate
                     {
                         _recentAlerts.Clear();
+                        _lastGuardSignature = "";   // 强制下一轮重建
                         RefreshGuardMenu();
                     };
                     _guardMenu.DropDownItems.Add(clear);
@@ -1361,7 +1407,7 @@ namespace CodeBuddyWorkKit
             try
             {
                 HttpWebRequest request = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + port + path);
-                request.Timeout = 2000;
+                request.Timeout = 1200;
                 request.ReadWriteTimeout = 2000;
                 request.Proxy = null;
                 using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())

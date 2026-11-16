@@ -33,7 +33,7 @@ const APPS = {
       CODEVAULT_PORT: String(cfg.ports.codevault),
       CODEVAULT_HOST: cfg.host
     }),
-    open: true
+    open: false
   },
   pulse: {
     label: '进度看板 Pulse',
@@ -128,13 +128,52 @@ function startApp(name, cfg) {
   return { name, ok: true, pid: child.pid };
 }
 
+/** 读一次 /api/health，拿不到就返回 null。 */
+async function readHealth(port) {
+  try {
+    const res = await fetch('http://127.0.0.1:' + port + '/api/health', {
+      signal: AbortSignal.timeout(1500)
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 判断占用该端口的到底是不是本套件的服务。
+ *
+ * 之前只看端口开没开就 `[skip]`，结果「别的实例（比如开发目录里那个）
+ * 占着端口」被当成「已经在跑」，用户看到的是「服务只启动了一部分」。
+ * 现在必须身份对得上才算已运行，否则明确报端口冲突。
+ *
+ *   codevault:  { ok, app: 'codevault', port }
+ *   pulse/tuner: { ok, version, port, pid, uptimeMs }
+ */
+function isOurs(health, name, port) {
+  if (!health || health.ok !== true) return false;
+  if (health.app === name) return true;
+  return Boolean(health.version) && health.port === port;
+}
+
 async function ensure(name, cfg, timeoutMs) {
   const app = APPS[name];
   const port = app.port(cfg);
 
   if (await portOpen(port)) {
-    console.log('[skip] ' + app.label + ' 已在 ' + port + ' 端口运行');
-    return { name, ok: true, started: false, port };
+    const health = await readHealth(port);
+    if (isOurs(health, name, port)) {
+      console.log('[skip] ' + app.label + ' 已在 ' + port + ' 端口运行');
+      return { name, ok: true, started: false, port };
+    }
+
+    console.error(
+      '[conflict] 端口 ' + port + ' 被占用，但不是本套件的服务：' +
+      (health ? JSON.stringify(health).slice(0, 90) : '（无 HTTP 响应）')
+    );
+    console.error('           请换一个端口，或先结束占用该端口的进程。');
+    return { name, ok: false, started: false, port, error: 'port-conflict' };
   }
 
   console.log('[start] ' + app.label + ' → 端口 ' + port);

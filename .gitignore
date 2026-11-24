@@ -1,5 +1,11 @@
 # 构建产物：由 build/build-package.ps1 每次重新生成，不入库
-payload/apps/
+#
+# 例外：_shared 与 errvault 是套件自身代码 —— 它们没有独立仓库承载，
+# 不入库就等于没有版本记录，从仓库重新构建也拿不到这两个目录。
+# 其余四个 app（codevault / pulse / tuner / scriptvault）各自有仓库，仍忽略。
+payload/apps/*
+!payload/apps/_shared/
+!payload/apps/errvault/
 payload/runtime/
 payload/shell/*.exe
 payload/native/*.exe

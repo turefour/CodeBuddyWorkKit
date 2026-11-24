@@ -1,14 +1,21 @@
 {
-  "$comment": "部署配置模板：安装器会把占位符替换成实际值，写到目标目录 config/deploy.json。",
-  "version": "1.0.0",
-  "host": "__HOST__",
-  "lan": __LAN__,
+  "$comment": "部署配置模板：字段说明 + 兜底参考。真正的 config/deploy.json 由 deploy.ps1 按当前用户生成。",
+  "version": "1.1.2",
+  "host": "127.0.0.1",
+  "lan": false,
   "ports": {
-    "codevault": __PORT_CODEVAULT__,
-    "pulse": __PORT_PULSE__,
-    "tuner": __PORT_TUNER__
+    "codevault": 47910,
+    "pulse": 47821,
+    "tuner": 47822,
+    "errvault": 47911
   },
-  "apps": ["codevault", "pulse", "tuner", "scriptvault"],
+  "apps": ["codevault", "pulse", "tuner", "errvault"],
+  "paths": {
+    "workspace": "%USERPROFILE%\\CodeBuddy",
+    "codeRoots": ["%USERPROFILE%\\CodeBuddy", "%USERPROFILE%\\Desktop"],
+    "scriptDir": "%USERPROFILE%\\Desktop\\handdelete",
+    "vaultRoot": "%USERPROFILE%\\Desktop\\ScriptVault"
+  },
   "rules": ["deploy-target.mdc"],
-  "runtime": "__RUNTIME__"
+  "runtime": "%LOCALAPPDATA%\\CodeBuddyWorkKit\\runtime\\node.exe"
 }

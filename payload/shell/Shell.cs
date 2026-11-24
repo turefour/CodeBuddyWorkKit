@@ -161,6 +161,12 @@ namespace CodeBuddyWorkKit
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        private static extern IntPtr GetParent(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
         [DllImport("user32.dll")]
@@ -186,6 +192,7 @@ namespace CodeBuddyWorkKit
         private const int SW_MAXIMIZE = 3;
         private const int SW_RESTORE = 9;
         private const int SW_MINIMIZE = 6;
+        private const uint WM_CLOSE = 0x0010;
 
         // ---------------------------------------------------------------- state
         private readonly string _kitRoot;
@@ -838,9 +845,11 @@ namespace CodeBuddyWorkKit
             {
                 if (!PortOpen(_port))
                 {
-                    _tray.BalloonTipText = "正在启动索引库服务…";
-                    StartLauncher("codevault");
-                    WaitHealth("http://127.0.0.1:" + _port + "/api/health", 25);
+                    // 一次拉起全部服务（原来只起 codevault，Pulse/Tuner/errvault 永远不自启）
+                    _tray.BalloonTipText = "正在启动全部服务…";
+                    StartLauncher("all");
+                    // 8 秒而不是 25 秒：等太久只会让用户以为卡死
+                    WaitHealth("http://127.0.0.1:" + _port + "/api/health", 8);
                 }
                 LaunchWindow();
             }
@@ -932,8 +941,11 @@ namespace CodeBuddyWorkKit
                 return;
             }
 
-            // Edge 需要几百毫秒才建出主窗口，轮询取句柄
-            _attachDeadline = DateTime.UtcNow.AddSeconds(15);
+            // Edge 需要几百毫秒才建出主窗口，轮询取句柄。
+            // 60 秒而不是 15 秒：--app 配新 user-data-dir 冷启动时，
+            // 建窗口 + 渲染首页常要 20-40 秒，15 秒到期后就永远嵌不进去，
+            // 用户看到的就是「窗口里空着」。
+            _attachDeadline = DateTime.UtcNow.AddSeconds(60);
             _attachTimer = new System.Windows.Forms.Timer();
             _attachTimer.Interval = 300;
             _attachTimer.Tick += delegate
@@ -945,6 +957,13 @@ namespace CodeBuddyWorkKit
                     // the wrapper reports 0. Enumerate windows owned by any msedge
                     // process that did not exist before our launch.
                     _pageHwnd = FindNewEdgeWindow(_preExistingEdge, "CodeVault");
+                    if (_pageHwnd == IntPtr.Zero)
+                    {
+                        // 兜底：Edge 会把 --app 请求交给已有进程复用，此时那个窗口的 PID
+                        // 不在「新进程」集合里，第一轮会被直接过滤掉。
+                        // 这里放开 PID 限制，只靠 标题 + 顶层 + 尺寸 三道校验兜住。
+                        _pageHwnd = FindNewEdgeWindow(new HashSet<uint>(), "CodeVault");
+                    }
                     if (_pageHwnd == IntPtr.Zero && _edge != null && !_edge.HasExited)
                     {
                         _edge.Refresh();
@@ -1025,6 +1044,10 @@ namespace CodeBuddyWorkKit
                     {
                         return true;
                     }
+
+                    // 只认顶层窗口：parent != 0 说明它已经被别的壳嵌过
+                    // （比如上一次 Shell 进程留下的孤儿窗口），嵌进来会是一块黑。
+                    if (GetParent(hWnd) != IntPtr.Zero) return true;
 
                     // 尺寸校验：--app 窗口是我们指定的 1320x860；用户自己的浏览窗口
                     // 尺寸随机，标题却可能同样是 "CodeVault"。不校验就会嵌错窗口。
@@ -1563,6 +1586,27 @@ namespace CodeBuddyWorkKit
             dlg.Controls.Add(openFolder);
 
             // ---- 底部按钮
+            // 一键重启：不动配置，只按当前端口重拉三个服务
+            Button restart = new Button();
+            restart.Text = "重启全部服务";
+            restart.Size = new Size(112, 30);
+            restart.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            restart.Location = new Point(dlg.ClientSize.Width - 378, dlg.ClientSize.Height - 48);
+            restart.FlatStyle = FlatStyle.Flat;
+            restart.FlatAppearance.BorderSize = 0;
+            restart.BackColor = Color.FromArgb(46, 54, 66);
+            restart.ForeColor = Color.FromArgb(210, 222, 234);
+            restart.Click += delegate
+            {
+                DialogResult ask = MessageBox.Show(this,
+                    "将按当前配置重启索引库、看板、降温三个服务。\r\n看板面板会短暂断开，约 3 秒恢复。\r\n\r\n继续？",
+                    "重启全部服务", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+                if (ask != DialogResult.OK) return;
+                dlg.Close();
+                RestartServices();
+            };
+            dlg.Controls.Add(restart);
+
             Button save = new Button();
             save.Text = "保存并重启";
             save.Size = new Size(112, 30);
@@ -1743,7 +1787,7 @@ namespace CodeBuddyWorkKit
         {
             try
             {
-                AddError("设置", "正在按新端口重启服务…");
+                AddError("设置", "正在重启全部服务…");
                 RunNodeTool("stop.mjs", "all");
                 Thread.Sleep(800);
                 RunNodeTool("launch.mjs", "all");
@@ -1981,7 +2025,14 @@ namespace CodeBuddyWorkKit
                 {
                     // not ready yet
                 }
-                Thread.Sleep(400);
+                // 关键：等待期间让出消息循环。
+                // 不加 DoEvents 的话 UI 线程被这个 while 占死，窗体连重绘都做不到，
+                // 用户看到的就是「窗口是空的」——其实不是页面白屏，是根本没刷出来。
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    Application.DoEvents();
+                }
+                Thread.Sleep(120);
             }
         }
 
@@ -2012,6 +2063,28 @@ namespace CodeBuddyWorkKit
 
         private void KillEdge()
         {
+            // 先按句柄关掉嵌入的那个窗口。
+            //
+            // _edge 只是 Process.Start 返回的包装进程。用户本来就开着 Edge 时，
+            // `msedge --app` 是发消息给已有 browser 进程，包装进程会立刻退出
+            // （HasExited == true），下面那个 Kill 就什么也没杀，窗口留在桌面上
+            // 变成 parent=0 的孤儿；下次启动第一轮「只认新 PID」的匹配会把它
+            // 过滤掉，表现就是「窗口里空白」。
+            if (_pageHwnd != IntPtr.Zero)
+            {
+                try
+                {
+                    PostMessage(_pageHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    Log("posted WM_CLOSE to embedded window " + _pageHwnd);
+                    Thread.Sleep(200);
+                }
+                catch
+                {
+                    // best effort: 窗口可能已经不在了
+                }
+                _pageHwnd = IntPtr.Zero;
+            }
+
             try
             {
                 if (_edge != null && !_edge.HasExited)

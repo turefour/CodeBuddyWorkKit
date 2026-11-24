@@ -23,6 +23,7 @@ param(
   [int]$PortCodevault = 47910,
   [int]$PortPulse = 47821,
   [int]$PortTuner = 47822,
+  [int]$PortErrvault = 47911,
   # 注意：不能叫 -Host，PowerShell 的 $Host 是只读内置变量，赋值会直接报错退出
   [string]$BindAddress = '127.0.0.1',
   [switch]$Json
@@ -67,6 +68,7 @@ $raw = $raw.Replace('__TARGET__', $Target)
 $raw = $raw.Replace('__PORT_CODEVAULT__', [string]$PortCodevault)
 $raw = $raw.Replace('__PORT_PULSE__', [string]$PortPulse)
 $raw = $raw.Replace('__PORT_TUNER__', [string]$PortTuner)
+$raw = $raw.Replace('__PORT_ERRVAULT__', [string]$PortErrvault)
 $raw = $raw.Replace('__HOST__', $BindAddress)
 $raw = $raw.Replace('__BASE__', ('http://127.0.0.1:' + $PortCodevault))
 $raw = $raw.Replace('__DEPLOYED__', (Get-Date).ToString('yyyy-MM-dd'))

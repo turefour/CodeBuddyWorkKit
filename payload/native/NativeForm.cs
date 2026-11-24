@@ -67,6 +67,7 @@ namespace WorkKit.Native
         private System.Windows.Forms.Timer _timer;
         private DateTime _lastTick = DateTime.MinValue;
         private int _failStreak;
+        private bool _autoStarted;
         private int _upCount = 3;
         private int _estTokens;
         private int _usageEvents;
@@ -153,6 +154,8 @@ namespace WorkKit.Native
                 LayoutShell();
                 ShowView("overview");
                 RefreshAll();
+                // 服务没起就后台拉起来（只试一次，不阻塞界面）
+                EnsureServicesOnce();
             };
             Resize += delegate { LayoutShell(); };
 
@@ -1389,6 +1392,21 @@ namespace WorkKit.Native
             folder.Click += delegate { try { Process.Start("explorer.exe", _kitRoot); } catch { } };
             dlg.Controls.Add(folder);
 
+            // 一键重启：不动配置，只按当前端口重拉三个服务（端口改了又不想改别的时用）
+            Button restart = Ui.Flat("重启全部服务", 112, 30);
+            restart.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            restart.Location = new Point(dlg.ClientSize.Width - 378, dlg.ClientSize.Height - 48);
+            restart.Click += delegate
+            {
+                DialogResult ask = MessageBox.Show(this,
+                    "将按当前配置重启索引库、看板、降温三个服务。\r\n看板面板会短暂断开，约 3 秒恢复。\r\n\r\n继续？",
+                    "重启全部服务", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+                if (ask != DialogResult.OK) return;
+                dlg.Close();
+                RestartServices();
+            };
+            dlg.Controls.Add(restart);
+
             Button save = Ui.Primary("保存并重启", 112, 30);
             save.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             save.Location = new Point(dlg.ClientSize.Width - 260, dlg.ClientSize.Height - 48);
@@ -1517,21 +1535,72 @@ namespace WorkKit.Native
             }
         }
 
+        /// <summary>
+        /// 重启全部服务。
+        ///
+        /// 放后台线程：RunNodeTool 里是 WaitForExit(25000)，
+        /// stop + sleep + launch 三连在 UI 线程跑一次能卡住窗口十几秒，
+        /// 用户看到的就是「点了重启，窗口不动了」。
+        /// </summary>
         private void RestartServices()
         {
-            try
+            AddError("设置", "正在重启全部服务…");
+            Task.Factory.StartNew(delegate
             {
-                AddError("设置", "正在按新端口重启服务…");
-                RunNodeTool("stop.mjs", "all");
-                Thread.Sleep(800);
-                RunNodeTool("launch.mjs", "all");
-                _failStreak = 0;
-                RefreshAll();
-            }
-            catch (Exception ex)
+                try
+                {
+                    RunNodeTool("stop.mjs", "all");
+                    Thread.Sleep(500);
+                    RunNodeTool("launch.mjs", "all");
+                    _failStreak = 0;
+                    OnUi(delegate { RefreshAll(); });
+                }
+                catch (Exception ex)
+                {
+                    string msg = ex.Message;
+                    OnUi(delegate { AddError("重启", msg); });
+                }
+            });
+        }
+
+        /// <summary>把 UI 操作切回界面线程；窗体已销毁时静默忽略。</summary>
+        private void OnUi(Action action)
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            try { BeginInvoke(action); } catch { }
+        }
+
+        /// <summary>
+        /// 启动时如果服务没跑，后台拉起全部一次。
+        ///
+        /// 只试一次（_autoStarted 守），避免 Timer 每 4 秒重复拉起。
+        /// 不阻塞 UI：探测 600ms 就放弃，launch.mjs 在后台慢慢跑。
+        /// </summary>
+        private void EnsureServicesOnce()
+        {
+            if (_autoStarted) return;
+            _autoStarted = true;
+
+            Task.Factory.StartNew(delegate
             {
-                AddError("重启", ex.Message);
-            }
+                try
+                {
+                    if (Api.GetOk("http://127.0.0.1:" + _port + "/api/health", 600)) return;
+                    AddErrorText("服务", "检测到服务未运行，正在后台启动…");
+                    RunNodeTool("launch.mjs", "all");
+                    OnUi(delegate { RefreshAll(); });
+                }
+                catch
+                {
+                    // 启动失败交给周期刷新反映状态，不再重复尝试
+                }
+            });
+        }
+
+        /// <summary>线程安全的 AddError（AddError 直接摸控件）。</summary>
+        private void AddErrorText(string source, string message)
+        {
+            OnUi(delegate { AddError(source, message); });
         }
 
         private void RunNodeTool(string script, string args)

@@ -50,6 +50,14 @@ const APPS = {
     port: (cfg) => cfg.ports.tuner,
     env: (cfg) => ({ CODEBUDDY_TUNER_HOST: cfg.host }),
     open: false
+  },
+  errvault: {
+    label: '报错库 errvault',
+    entry: path.join('apps', 'errvault', 'server.mjs'),
+    args: (cfg) => ['--port', String(cfg.ports.errvault)],
+    port: (cfg) => cfg.ports.errvault,
+    env: (cfg) => ({ ERRVAULT_HOST: cfg.host }),
+    open: false
   }
 };
 
@@ -94,7 +102,8 @@ async function healthOk(url, timeoutMs) {
     } catch {
       /* not up yet */
     }
-    await sleep(400);
+    // 150ms 一轮：Node 冷启动约 150-400ms，400ms 的间隔平均多等 200ms
+    await sleep(150);
   }
   return false;
 }
@@ -197,19 +206,19 @@ async function main() {
   const timeoutMs = (timeoutArg >= 0 ? Number(argv[timeoutArg + 1]) : 20) * 1000;
 
   const cfg = readConfig();
-  const names = target === 'all' ? ['codevault', 'pulse', 'tuner'] : [target];
+  // 用 Object.keys(APPS) 而不是写死数组：以后新增服务不用再回来改这一行
+  const names = target === 'all' ? Object.keys(APPS) : [target];
   if (!names.every((n) => APPS[n])) {
-    console.error('未知目标：' + target + '（可选 codevault / pulse / tuner / all）');
+    console.error('未知目标：' + target + '（可选 ' + Object.keys(APPS).join(' / ') + ' / all）');
     process.exit(2);
   }
 
   console.log('部署目录：' + KIT_ROOT);
   console.log('监听地址：' + cfg.host + (cfg.lan ? '（已允许局域网访问）' : '（仅本机）'));
 
-  const results = [];
-  for (const name of names) {
-    results.push(await ensure(name, cfg, timeoutMs));
-  }
+  // 并行启动：4 个服务同时 ensure，总耗时≈最慢的那个。
+  // 之前是 for + await 串行，冷启动要 4 份等待累加（实测 6-10 秒）。
+  const results = await Promise.all(names.map((n) => ensure(n, cfg, timeoutMs)));
 
   const failed = results.filter((r) => !r.ok);
   const dash = results.find((r) => r.name === 'codevault' && r.ok);

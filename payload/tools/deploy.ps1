@@ -19,6 +19,7 @@ param(
   [int]$Port = 47910,
   [int]$PulsePort = 47821,
   [int]$TunerPort = 47822,
+  [int]$ErrvaultPort = 47911,
   [switch]$Lan,
   [switch]$NoDesktop,
   [switch]$NoRules,
@@ -125,7 +126,12 @@ Say ''
 Say '  [1/5] 复制应用代码' 'Cyan'
 
 $totalFiles = 0
-foreach ($app in @('codevault', 'pulse', 'tuner', 'scriptvault')) {
+# 从 payload\apps 目录推导，而不是写死清单：
+# 之前这里漏了 errvault，重新部署会整个服务都不见了。
+$appDirs = @(Get-ChildItem (Join-Path $PayloadRoot 'apps') -Directory -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty Name | Sort-Object)
+if (-not $appDirs.Count) { $appDirs = @('codevault', 'pulse', 'tuner', 'errvault', 'scriptvault') }
+foreach ($app in $appDirs) {
   $src = Join-Path $PayloadRoot ("apps\" + $app)
   $dst = Join-Path $Target ("apps\" + $app)
   $totalFiles += Copy-Tree -Source $src -Destination $dst -Label $app
@@ -216,8 +222,20 @@ if ((Test-Path $configFile) -and -not $ResetConfig) {
     version    = $PackageVersion
     host       = $(if ($Lan) { '0.0.0.0' } else { '127.0.0.1' })
     lan        = [bool]$Lan
-    ports      = [pscustomobject]@{ codevault = $Port; pulse = $PulsePort; tuner = $TunerPort }
-    apps       = @('codevault', 'pulse', 'tuner', 'scriptvault')
+    ports      = [pscustomobject]@{ codevault = $Port; pulse = $PulsePort; tuner = $TunerPort; errvault = $ErrvaultPort }
+    # scriptvault 不是常驻 Web 服务（只是脚本库，经索引页访问），不要列进启动清单，
+    # 否则 launch.mjs 会因为不认识它而静默忽略，配置与行为对不上。
+    apps       = @('codevault', 'pulse', 'tuner', 'errvault')
+    # 路径全部相对当前用户推导：换用户名 / 换盘符时只改这里，不动代码
+    paths      = [pscustomobject]@{
+                   workspace = (Join-Path $env:USERPROFILE 'CodeBuddy')
+                   codeRoots = @(
+                     (Join-Path $env:USERPROFILE 'CodeBuddy'),
+                     (Join-Path $env:USERPROFILE 'Desktop')
+                   )
+                   scriptDir = (Join-Path $env:USERPROFILE 'Desktop\handdelete')
+                   vaultRoot = (Join-Path $env:USERPROFILE 'Desktop\ScriptVault')
+                 }
     rules      = @('deploy-target.mdc')
     runtime    = $runtimePath
     target     = $Target
@@ -230,7 +248,7 @@ if ((Test-Path $configFile) -and -not $ResetConfig) {
     ($config | ConvertTo-Json -Depth 5),
     (New-Object System.Text.UTF8Encoding $false)
   )
-  Say ("  [ok]   config\deploy.json（端口 {0}/{1}/{2}，监听 {3}）" -f $Port, $PulsePort, $TunerPort, $config.host) 'Green'
+  Say ("  [ok]   config\deploy.json（端口 {0}/{1}/{2}/{3}，监听 {4}）" -f $Port, $PulsePort, $TunerPort, $ErrvaultPort, $config.host) 'Green'
 }
 
 # 仓库清单里先登记本套件自身：否则「仓库与备份」页面是空的，用户不知道能加什么
@@ -359,6 +377,7 @@ if (-not $NoRules) {
       '-PortCodevault', [string]$config.ports.codevault,
       '-PortPulse', [string]$config.ports.pulse,
       '-PortTuner', [string]$config.ports.tuner,
+  '-PortErrvault', [string]$config.ports.errvault,
       '-BindAddress', [string]$config.host,
       '-Platforms', $Platforms
     )

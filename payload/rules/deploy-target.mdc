@@ -16,6 +16,7 @@ alwaysApply: true
 | 索引库（项目 / 源码 / 仓库状态 / 脚本库） | __BASE__/ |
 | 进度看板 Pulse | `http://127.0.0.1:__PORT_PULSE__/` |
 | 降温面板 Tuner | `http://127.0.0.1:__PORT_TUNER__/` |
+| **报错库 errvault** | `http://127.0.0.1:__PORT_ERRVAULT__/` |
 | 监听地址 | `__HOST__` |
 
 启动与停止（不要手敲 node 命令）：
@@ -85,6 +86,109 @@ __TARGET__\
 
 注意：评估「从零更省」时**必须算隐性坑**。例：手写 PowerShell 读 JSON 忘了 `-Encoding UTF8`，
 PS 5.1 按 GBK 解码会直接报错并吐出整份 JSON（≈780 token），一次返工就吃掉全部收益。
+
+## 2.1 报错库 errvault（遇到问题先查，解决后必记）
+
+### 什么时候必须先查库
+
+出现下面任一情况，**先查库，不要直接开始试错**：
+
+| 触发条件 | 典型表现 |
+|---|---|
+| 命令 / 工具报错 | `Access is denied`、`ENOENT`、`command not found`、`TypeError` |
+| 流程卡死 | 超过 2 分钟无输出；进程 `Responding=True` 但永不返回 |
+| 被系统拦截 | 文件锁、权限拒绝、安全软件拦截、系统目录保护、端口占用 |
+| 同类问题再次发生 | 上次怎么解的记忆模糊 |
+
+### 查库（第一步）
+
+```powershell
+& "__TARGET__\runtime\node.exe" "__TARGET__\tools\errvault.mjs" search "关键词"
+```
+
+关键词用**报错原文里的词**（如 `Access is denied`、`文件占用`），不要用自己概括的词。
+
+| 退出码 | 含义 | 下一步 |
+|---|---|---|
+| `0` | 命中 | 按库里「正确做法」执行，**不要重新试错** |
+| `2` | 未命中 | 按常规排查；解决后**必须记录** |
+
+### 记录（解决后立刻做）
+
+```powershell
+& "__TARGET__\runtime\node.exe" "__TARGET__\tools\errvault.mjs" add `
+  --kind error `
+  --scope machine `
+  --repro often `
+  --severity major `
+  --tool "Bash / Remove-Item" `
+  --goal "想达成什么" `
+  --symptom "报错原文，不要改写" `
+  --cause "根因，不是尝试过程" `
+  --fix "可执行的正确做法，含关键命令" `
+  --tags "powershell,encoding" `
+  --code-file "D:\tmp\repro.ps1"
+```
+
+`--kind` 取值：
+
+| 值 | 含义 |
+|---|---|
+| `error` | 命令或工具抛错 |
+| `hang` | 卡死、无响应、超时 |
+| `blocked` | 被权限 / 锁 / 安全软件 / 系统策略拦截 |
+| `tool-fail` | 工具返回了但不是预期结果（如写入了错位置） |
+
+### 字段要求
+
+| 字段 | 必填 | 要求 |
+|---|---|---|
+| `--symptom` | **是** | 粘贴报错原文。检索靠原文分词匹配，改写会降低命中率 |
+| `--scope` | 建议 | 影响范围：`single` 单次任务 / `project` 单个项目 / `machine` 整机环境 / `global` 跨项目通用 |
+| `--repro` | 建议 | 复现概率：`always` 必现 / `often` >50% / `sometimes` 10-50% / `rare` <10% |
+| `--severity` | 建议 | 严重度：`blocker` 做不下去 / `major` 大幅拖慢 / `minor` 绕一下就行 |
+| `--tool` | 建议 | 工具名或函数名：`Bash` / `write_to_file` / `Word COM` / `git` |
+| `--goal` | 建议 | 当时想做什么，换个人也能看懂 |
+| `--cause` | 建议 | 根因。写「为什么」，不是「我试了三次」 |
+| `--fix` | 建议 | 可执行的正确做法。带命令、带参数、带前提条件 |
+| `--code-file` | 建议 | 最小复现或修复片段；落到 `apps\errvault\data\snippets\<id>\` |
+| `--tags` | 建议 | 逗号分隔，2-4 个，如 `powershell,encoding,bom` |
+
+**出现次数自动累加**：同一个 `--symptom` 再次 `add` 时不会新建记录，
+而是把 `count` 加一并刷新 `lastSeen`。所以**只带 `--symptom` 就够了**，
+其余字段会保留库里的原值（不会被默认值冲掉）。
+
+### 其它命令
+
+```powershell
+& "__TARGET__\runtime\node.exe" "__TARGET__\tools\errvault.mjs" list --limit 10
+& "__TARGET__\runtime\node.exe" "__TARGET__\tools\errvault.mjs" show <id>
+& "__TARGET__\runtime\node.exe" "__TARGET__\tools\errvault.mjs" stats
+& "__TARGET__\runtime\node.exe" "__TARGET__\tools\errvault.mjs" logs --tail 40
+```
+
+`stats` 会按影响范围 / 复现概率 / 严重度分组，并列出「反复踩的坑」（count > 1），
+这些是最该优先根治的。
+
+### 运行日志
+
+所有 `boot` / `add` / `recur` / `update` / `hit` / `search` 都会写进：
+
+```
+__TARGET__\apps\errvault\data\logs\errvault-YYYYMM.log
+```
+
+按月分文件，超 1 MB 轮转成 `.1.log`（只留一代）。页面右上角「日志」按钮可看最近 400 行，
+CLI 用 `logs --tail N`。同一个关键词 10 秒内只记一行，避免搜索框防抖刷屏。
+
+索引页：`http://127.0.0.1:__PORT_ERRVAULT__/`（可搜索、按类型筛选、点开看代码）
+
+### 硬性要求
+
+1. **查库命中后不要重新试错** —— 记录的意义就是省掉这一步
+2. **未命中且已解决 → 必须记录** —— 否则下次还踩同一个坑
+3. **记录不完整可以覆盖** —— 用同一段 `--symptom` 再 `add` 一次，会把旧记录合并（`id` 不变）
+4. **不要把密钥 / token 写进记录**，脱敏后再贴
 
 ## 3. 版本管理（任务收尾必做）
 

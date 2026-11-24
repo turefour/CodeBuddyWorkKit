@@ -15,7 +15,9 @@
 param(
   [string]$Out = '',
   [switch]$NoRuntime,
-  [switch]$NoGit
+  [switch]$NoGit,
+  # 默认以 payload\apps 为准；加这个开关才从开发目录刷新（会覆盖同名文件）
+  [switch]$RefreshApps
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,7 +42,8 @@ $ExcludeSegments = @(
   'node_modules', '.git', 'dist', 'build', 'logs', '.pulse',
   '安装包', 'screens', '.cache', 'coverage', '.tools', '.playwright-cli'
 )
-$ExcludeFiles = @('*.log', '*.zip', '*.pid', '*.tsbuildinfo', '*.bak_*', '.DS_Store', 'Thumbs.db', '*.tmp')
+# '*.bak' 必须单独列：替换 exe / 源码时留的备份会被打进包，白白增重还暴露旧版本
+$ExcludeFiles = @('*.log', '*.zip', '*.pid', '*.tsbuildinfo', '*.bak', '*.bak_*', '.DS_Store', 'Thumbs.db', '*.tmp')
 
 function Test-Skip {
   param([string]$RelativePath)
@@ -90,15 +93,33 @@ Say ''
 Say '  CodeBuddy 工作套件 - 打包' 'Cyan'
 Say '  ============================================' 'DarkGray'
 
-# ------------------------------------------------------------------ 1. 清理并复制应用
+# ------------------------------------------------------------------ 1. 应用源码
+# 默认直接用 payload\apps 里现有的代码打包。
+#
+# 原来是「先删掉 payload\apps 整个目录，再从四个开发目录重新复制」。这有两个问题：
+#   1. 开发目录的代码可能落后于 payload（改动落在 payload 和部署目录时，
+#      开发目录不会自动同步），重新复制等于把修复回滚掉；
+#   2. 复制的应用是写死的四个，payload 里新增的 errvault / _shared 会被整目录删除，
+#      打出来的包在这两个目录上直接缺失，服务起不来。
+# 确实需要从开发目录刷新时，显式加 -RefreshApps。
 Say ''
-Say '  [1/5] 复制应用源码' 'Cyan'
-if (Test-Path $AppsDir) { Remove-Item $AppsDir -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $AppsDir | Out-Null
+Say '  [1/5] 准备应用源码' 'Cyan'
 
 $total = 0
-foreach ($name in @('codevault', 'pulse', 'tuner', 'scriptvault')) {
-  $total += Copy-Filtered -Source $Sources[$name] -Destination (Join-Path $AppsDir $name) -Label $name
+if ($RefreshApps) {
+  Say '  [refresh] 从开发目录重新复制（覆盖 payload\apps 同名文件；不会删除 payload 独有目录）' 'Yellow'
+  foreach ($name in ($Sources.Keys | Sort-Object)) {
+    $total += Copy-Filtered -Source $Sources[$name] -Destination (Join-Path $AppsDir $name) -Label $name
+  }
+} else {
+  $appNames = @(Get-ChildItem $AppsDir -Directory -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty Name | Sort-Object)
+  if (-not $appNames.Count) { throw ('payload\apps 是空的：' + $AppsDir) }
+  foreach ($name in $appNames) {
+    $n = @(Get-ChildItem (Join-Path $AppsDir $name) -Recurse -File -Force -ErrorAction SilentlyContinue).Count
+    Say ("  [keep] {0,-12} {1,5} 个文件" -f $name, $n) 'Green'
+  }
+  Say '  [info] 以 payload\apps 为准；要从开发目录刷新请加 -RefreshApps' 'DarkGray'
 }
 
 # ------------------------------------------------------------------ 1b. 版本号
@@ -251,7 +272,8 @@ if (Test-Path $changelog) {
 Say '  [5/5] 生成压缩包' 'Cyan'
 
 if ($Out -eq '') {
-  $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) 'CodeBuddyWorkKit-1.0.0.zip'
+  # 文件名跟着 VERSION 走，不要写死：以前硬编码 1.0.0，升版本后包名和内容对不上
+  $Out = Join-Path ([Environment]::GetFolderPath('Desktop')) ('CodeBuddyWorkKit-' + $PackageVersion + '.zip')
 }
 if (Test-Path $Out) { Remove-Item $Out -Force }
 
